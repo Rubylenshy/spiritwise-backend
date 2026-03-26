@@ -159,3 +159,22 @@ def tag_list(request):
     """GET /api/sermons/tags/"""
     tags = Tag.objects.all()
     return Response(TagSerializer(tags, many=True).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_stream_token(request, pk):
+    """
+    GET /api/sermons/{pk}/stream-token/
+    Returns a short-lived signed token the frontend uses to build
+    an authenticated stream URL for the <audio> element.
+    """
+    try:
+        Sermon.objects.get(pk=pk, is_published=True)
+    except Sermon.DoesNotExist:
+        return Response({'detail': 'Sermon not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    from apps.sermons.stream_token import generate_stream_token
+    token = generate_stream_token(request.user.id, pk)
+
+    return Response({'token': token, 'sermon_id': pk})

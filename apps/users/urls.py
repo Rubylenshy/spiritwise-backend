@@ -4,6 +4,10 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
 
 urlpatterns = [
+    # Badges & streak freeze
+    path('badges/', views.my_badges, name='auth-badges'),
+    path('streak-freeze/', views.use_streak_freeze, name='auth-streak-freeze'),
+
     # Registration & login
     path('register/', views.register, name='auth-register'),
     path('login/', views.login, name='auth-login'),

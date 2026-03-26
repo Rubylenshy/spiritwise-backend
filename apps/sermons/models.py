@@ -51,7 +51,8 @@ class Sermon(models.Model):
 
     # Audio
     audio_file = models.FileField(upload_to='sermons/audio/', blank=True, null=True)
-    audio_url = models.URLField(blank=True)  # external URL fallback
+    audio_url = models.URLField(blank=True)       # public CDN URL (R2 or external)
+    r2_key = models.CharField(max_length=500, blank=True)  # R2 object key for streaming proxy
     duration_seconds = models.PositiveIntegerField(default=0)
 
     # Metadata

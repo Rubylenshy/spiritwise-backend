@@ -68,17 +68,71 @@ def refresh_all_time_leaderboard():
 @shared_task(name='engagement.check_broken_streaks')
 def check_broken_streaks():
     """
-    Runs daily to reset streaks for users who missed yesterday.
+    Runs daily at 00:05 UTC.
+    For each user with an active streak who missed yesterday:
+    - If they have a freeze available, consume it silently (streak survives)
+    - Otherwise reset streak to 0
     """
     from django.utils.timezone import now
     yesterday = now().date() - timezone.timedelta(days=1)
+    two_days_ago = now().date() - timezone.timedelta(days=2)
 
-    broken = User.objects.filter(
+    at_risk = User.objects.filter(
         current_streak__gt=0
     ).exclude(
         last_active_date__gte=yesterday
     )
 
-    count = broken.count()
-    broken.update(current_streak=0)
-    return f'Reset streaks for {count} users'
+    frozen = 0
+    reset = 0
+
+    for user in at_risk:
+        if user.streak_freeze_available and user.last_active_date and user.last_active_date >= two_days_ago:
+            # Grace day used automatically
+            user.streak_freeze_available = False
+            user.last_active_date = yesterday  # bridge the gap
+            user.save(update_fields=['streak_freeze_available', 'last_active_date'])
+            frozen += 1
+        else:
+            user.current_streak = 0
+            user.save(update_fields=['current_streak'])
+            reset += 1
+
+    return f'Streaks: {frozen} protected by freeze, {reset} reset'
+
+
+@shared_task(name='engagement.send_streak_reminders')
+def send_streak_reminders():
+    """
+    Runs daily at 6pm UTC.
+    Sends a reminder email to users who have a streak > 0 but
+    haven't been active today.
+    """
+    from django.core.mail import send_mass_mail
+    from django.utils.timezone import now
+
+    today = now().date()
+
+    at_risk = User.objects.filter(
+        current_streak__gt=0,
+        email_reminders=True,
+        is_active=True,
+    ).exclude(last_active_date=today)
+
+    messages = []
+    for user in at_risk:
+        subject = f'🔥 Your {user.current_streak}-day streak needs you today'
+        body = (
+            f"Hi {user.first_name or user.username},\n\n"
+            f"You're on a {user.current_streak}-day streak — don't break it!\n"
+            f"Listen to a sermon today to keep your streak going.\n\n"
+            f"Open SpiritWise → http://localhost:5173\n\n"
+            f"— The SpiritWise team\n\n"
+            f"To unsubscribe from reminders, visit your profile settings."
+        )
+        messages.append((subject, body, 'noreply@spiritwise.app', [user.email]))
+
+    if messages:
+        send_mass_mail(messages, fail_silently=True)
+
+    return f'Sent {len(messages)} reminder emails'

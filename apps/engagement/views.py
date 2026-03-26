@@ -37,6 +37,14 @@ def stats(request):
 
     last_7 = StreakRecord.objects.filter(user=user).order_by('-date')[:7]
 
+    from apps.users.models import UserBadge
+    recent_badges = list(
+        UserBadge.objects.filter(user=user)
+        .select_related('badge')
+        .order_by('-earned_at')[:5]
+        .values('badge__name', 'badge__icon', 'badge__description', 'earned_at')
+    )
+
     data = {
         'current_streak': user.current_streak,
         'longest_streak': user.longest_streak,
@@ -45,6 +53,17 @@ def stats(request):
         'minutes_today': minutes_today,
         'sermons_completed': sermons_completed,
         'last_7_days': StreakRecordSerializer(last_7, many=True).data,
+        'streak_freeze_available': user.streak_freeze_available,
+        'streak_freeze_earned_at': user.streak_freeze_earned_at,
+        'recent_badges': [
+            {
+                'name': b['badge__name'],
+                'icon': b['badge__icon'],
+                'description': b['badge__description'],
+                'earned_at': str(b['earned_at']),
+            }
+            for b in recent_badges
+        ],
     }
     return Response(EngagementStatsSerializer(data).data)
 

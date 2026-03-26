@@ -43,6 +43,7 @@ class SermonDetailSerializer(serializers.ModelSerializer):
     questions = SermonQuestionSerializer(many=True, read_only=True)
     audio_signed_url = serializers.SerializerMethodField()
     user_progress = serializers.SerializerMethodField()
+    next_sermon = serializers.SerializerMethodField()
 
     class Meta:
         model = Sermon
@@ -50,42 +51,30 @@ class SermonDetailSerializer(serializers.ModelSerializer):
             'id', 'title', 'slug', 'speaker', 'series', 'tags',
             'description', 'audio_signed_url', 'duration_seconds', 'duration_display',
             'scripture_reference', 'sermon_date', 'thumbnail',
-            'play_count', 'questions', 'user_progress',
+            'play_count', 'questions', 'user_progress', 'next_sermon',
         ]
 
     def get_audio_signed_url(self, obj):
         """
-        Returns a signed S3 URL if using cloud storage,
-        otherwise returns the direct file URL.
+        Returns the stream URL with an embedded signed token so the
+        HTML5 <audio> element can authenticate without sending headers.
+        Format: /api/sermons/{id}/stream/?token=<signed>
         """
         request = self.context.get('request')
-        from django.conf import settings
 
-        if obj.audio_url:
-            return obj.audio_url
+        if not request:
+            return None
 
+        if obj.r2_key or obj.audio_url:
+            # Generate a short-lived signed token for this user + sermon
+            from apps.sermons.stream_token import generate_stream_token
+            token = generate_stream_token(request.user.id, obj.pk)
+            base_url = request.build_absolute_uri(f'/api/sermons/{obj.pk}/stream/')
+            return f'{base_url}?token={token}'
+
+        # Local file fallback (dev only, no token needed)
         if obj.audio_file:
-            if getattr(settings, 'USE_S3', False):
-                # Generate signed URL via boto3
-                import boto3
-                from botocore.config import Config
-                s3 = boto3.client(
-                    's3',
-                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                    region_name=settings.AWS_S3_REGION_NAME,
-                    config=Config(signature_version='s3v4'),
-                )
-                return s3.generate_presigned_url(
-                    'get_object',
-                    Params={
-                        'Bucket': settings.AWS_STORAGE_BUCKET_NAME,
-                        'Key': obj.audio_file.name,
-                    },
-                    ExpiresIn=settings.AWS_QUERYSTRING_EXPIRE,
-                )
-            elif request:
-                return request.build_absolute_uri(obj.audio_file.url)
+            return request.build_absolute_uri(obj.audio_file.url)
 
         return None
 
@@ -102,7 +91,31 @@ class SermonDetailSerializer(serializers.ModelSerializer):
         except ListenHistory.DoesNotExist:
             return {'progress_seconds': 0, 'completed': False}
 
+    def get_next_sermon(self, obj):
+        """Next sermon in the same series, or None."""
+        if not obj.series:
+            return None
+        next_s = (
+            Sermon.objects
+            .filter(series=obj.series, is_published=True)
+            .exclude(pk=obj.pk)
+            .order_by('sermon_date', 'created_at')
+            .first()
+        )
+        if not next_s:
+            return None
+        request = self.context.get('request')
+        return {
+            'id': next_s.id,
+            'title': next_s.title,
+            'speaker': next_s.speaker,
+            'duration_display': next_s.duration_display,
+            'thumbnail': request.build_absolute_uri(next_s.thumbnail.url)
+                if next_s.thumbnail and request else None,
+        }
+
 
 class ProgressUpdateSerializer(serializers.Serializer):
     progress_seconds = serializers.IntegerField(min_value=0)
     completed = serializers.BooleanField(default=False)
+

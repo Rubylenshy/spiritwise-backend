@@ -18,6 +18,9 @@ class EngagementStatsSerializer(serializers.Serializer):
     minutes_today = serializers.IntegerField()
     sermons_completed = serializers.IntegerField()
     last_7_days = StreakRecordSerializer(many=True)
+    streak_freeze_available = serializers.BooleanField()
+    streak_freeze_earned_at = serializers.DateField(allow_null=True)
+    recent_badges = serializers.ListField(child=serializers.DictField())
 
 
 class LogActivitySerializer(serializers.Serializer):
@@ -37,8 +40,10 @@ class QuestionAnswerSerializer(serializers.ModelSerializer):
 
 
 class LeaderboardEntrySerializer(serializers.ModelSerializer):
-    user = UserPublicSerializer(read_only=True)
+    username = serializers.CharField(source='user.username', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    streak = serializers.IntegerField(source='user.current_streak', read_only=True)
 
     class Meta:
         model = LeaderboardEntry
-        fields = ['rank', 'user', 'xp', 'period', 'week_start']
+        fields = ['rank', 'user_id', 'username', 'streak', 'xp', 'period', 'week_start']

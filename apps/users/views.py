@@ -147,3 +147,38 @@ def logout(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     return Response({'detail': 'Successfully logged out.'}, status=status.HTTP_205_RESET_CONTENT)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def my_badges(request):
+    """
+    GET /api/auth/badges/
+    Returns the current user's earned badges in reverse-chronological order.
+    """
+    from apps.users.models import UserBadge
+    from .serializers import UserBadgeSerializer
+    badges = UserBadge.objects.filter(user=request.user).select_related('badge')
+    return Response(UserBadgeSerializer(badges, many=True).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def use_streak_freeze(request):
+    """
+    POST /api/auth/streak-freeze/
+    Manually activates a streak freeze if one is available.
+    (Automatic use happens in record_activity — this lets users see
+    and manually confirm they have a freeze available.)
+    """
+    user = request.user
+    if not user.streak_freeze_available:
+        return Response(
+            {'detail': 'No streak freeze available. Reach a 7-day streak to earn one.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return Response({
+        'streak_freeze_available': True,
+        'streak_freeze_earned_at': user.streak_freeze_earned_at,
+        'message': 'Your streak freeze is active. It will automatically protect your streak if you miss a day.',
+    })

@@ -14,10 +14,12 @@ class UserPublicSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
             'avatar', 'xp_points', 'current_streak', 'longest_streak',
-            'daily_goal_minutes', 'date_joined',
+            'daily_goal_minutes', 'email_reminders', 'streak_freeze_available',
+            'date_joined', 'is_staff', 'is_superuser',
         ]
         read_only_fields = [
-            'id', 'xp_points', 'current_streak', 'longest_streak', 'date_joined',
+            'id', 'xp_points', 'current_streak', 'longest_streak',
+            'streak_freeze_available', 'date_joined', 'is_staff', 'is_superuser',
         ]
 
 
@@ -66,7 +68,7 @@ class AuthResponseSerializer(serializers.Serializer):
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['first_name', 'last_name', 'avatar', 'daily_goal_minutes']
+        fields = ['first_name', 'last_name', 'avatar', 'daily_goal_minutes', 'email_reminders']
 
 
 class ChangePasswordSerializer(serializers.Serializer):
@@ -78,3 +80,19 @@ class ChangePasswordSerializer(serializers.Serializer):
         if not user.check_password(value):
             raise serializers.ValidationError('Current password is incorrect.')
         return value
+
+
+class BadgeSerializer(serializers.ModelSerializer):
+    class Meta:
+        from apps.users.models import Badge
+        model = Badge
+        fields = ['id', 'name', 'description', 'icon', 'trigger', 'threshold']
+
+
+class UserBadgeSerializer(serializers.ModelSerializer):
+    badge = BadgeSerializer(read_only=True)
+
+    class Meta:
+        from apps.users.models import UserBadge
+        model = UserBadge
+        fields = ['id', 'badge', 'earned_at']
