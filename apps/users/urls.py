@@ -18,6 +18,7 @@ urlpatterns = [
 
     # Profile
     path('me/', views.me, name='auth-me'),
+    path('avatar/', views.upload_avatar, name='auth-avatar'),
     path('profile/', views.update_profile, name='auth-profile-update'),
     path('change-password/', views.change_password, name='auth-change-password'),
 ]

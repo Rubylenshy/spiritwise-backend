@@ -206,3 +206,36 @@ EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='SpiritWise <noreply@spiritwise.app>')
+
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+# Suppress broken pipe errors from audio streaming disconnects
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {
+        'ignore_broken_pipe': {
+            '()': 'django.utils.log.CallbackFilter',
+            'callback': lambda record: 'Broken pipe' not in record.getMessage()
+                and 'ConnectionResetError' not in record.getMessage(),
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'filters': ['ignore_broken_pipe'],
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django.server': {
+            'handlers': ['console'],
+            'filters': ['ignore_broken_pipe'],
+            'propagate': False,
+        },
+    },
+}

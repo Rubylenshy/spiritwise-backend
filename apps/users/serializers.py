@@ -8,6 +8,17 @@ User = get_user_model()
 
 class UserPublicSerializer(serializers.ModelSerializer):
     """Minimal user data returned in auth responses and embeds."""
+    avatar = serializers.SerializerMethodField()
+
+    def get_avatar(self, obj):
+        if not obj.avatar:
+            return None
+        request = self.context.get('request')
+        url = obj.avatar.url
+        if request:
+            return request.build_absolute_uri(url)
+        return url
+
 
     class Meta:
         model = User

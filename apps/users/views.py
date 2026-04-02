@@ -96,8 +96,13 @@ def me(request):
 def update_profile(request):
     """
     PATCH /api/auth/profile/
-    Update first_name, last_name, avatar, daily_goal_minutes.
+    Accepts both JSON and multipart/form-data (for avatar upload).
     """
+    from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+    # Re-parse if multipart (avatar upload)
+    if hasattr(request, 'FILES') and request.FILES:
+        parser = MultiPartParser()
+
     serializer = ProfileUpdateSerializer(
         request.user, data=request.data, partial=True
     )
@@ -105,7 +110,53 @@ def update_profile(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     serializer.save()
-    return Response(UserPublicSerializer(request.user).data)
+    # Refresh from DB to get updated avatar URL
+    request.user.refresh_from_db()
+    return Response(UserPublicSerializer(request.user, context={'request': request}).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_avatar(request):
+    """
+    POST /api/auth/avatar/
+    multipart/form-data with avatar field.
+    Replaces the user's profile image.
+    """
+    avatar_file = request.FILES.get('avatar')
+    if not avatar_file:
+        return Response({'detail': 'avatar file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Validate it's an image
+    allowed_types = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+    if avatar_file.content_type not in allowed_types:
+        return Response(
+            {'detail': 'Invalid image format. Use JPEG, PNG, or WebP.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Max 5MB
+    if avatar_file.size > 5 * 1024 * 1024:
+        return Response(
+            {'detail': 'Image too large. Maximum size is 5MB.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user = request.user
+    # Delete old avatar if exists
+    if user.avatar:
+        try:
+            user.avatar.delete(save=False)
+        except Exception:
+            pass
+
+    import uuid, os
+    ext = os.path.splitext(avatar_file.name)[1] or '.jpg'
+    filename = f'{uuid.uuid4().hex}{ext}'
+    user.avatar.save(filename, avatar_file, save=True)
+    user.refresh_from_db()
+
+    return Response(UserPublicSerializer(user, context={'request': request}).data)
 
 
 @api_view(['POST'])

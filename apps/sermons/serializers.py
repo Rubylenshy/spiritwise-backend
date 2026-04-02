@@ -56,23 +56,25 @@ class SermonDetailSerializer(serializers.ModelSerializer):
 
     def get_audio_signed_url(self, obj):
         """
-        Returns the stream URL with an embedded signed token so the
-        HTML5 <audio> element can authenticate without sending headers.
-        Format: /api/sermons/{id}/stream/?token=<signed>
+        Generate a presigned R2 URL directly — no token needed.
+        The stream endpoint handles auth; the URL itself is short-lived.
         """
         request = self.context.get('request')
-
         if not request:
             return None
 
+        # R2 file — build stream URL with signed token
         if obj.r2_key or obj.audio_url:
-            # Generate a short-lived signed token for this user + sermon
-            from apps.sermons.stream_token import generate_stream_token
-            token = generate_stream_token(request.user.id, obj.pk)
-            base_url = request.build_absolute_uri(f'/api/sermons/{obj.pk}/stream/')
-            return f'{base_url}?token={token}'
+            try:
+                from apps.sermons.stream_token import generate_stream_token
+                token = generate_stream_token(request.user.id, obj.pk)
+                base = request.build_absolute_uri(f'/api/sermons/{obj.pk}/stream/')
+                return f'{base}?token={token}'
+            except Exception:
+                # Fallback to direct public URL if token generation fails
+                if obj.audio_url:
+                    return obj.audio_url
 
-        # Local file fallback (dev only, no token needed)
         if obj.audio_file:
             return request.build_absolute_uri(obj.audio_file.url)
 

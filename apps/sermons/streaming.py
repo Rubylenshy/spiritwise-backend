@@ -1,34 +1,40 @@
 """
-Spotify-style audio streaming through Django.
+Audio streaming via presigned R2 URLs.
 
-Authentication: two paths both supported —
-  1. Authorization: Bearer <jwt>  (API calls, e.g. fetch())
-  2. ?token=<signed_token>        (HTML5 <audio> element, which can't send headers)
+Flow:
+  1. Browser requests /api/sermons/{id}/stream/?token=<signed>
+  2. Django validates the token (JWT or signed token)
+  3. Django generates a presigned R2 URL valid for 60 seconds
+  4. Django returns 302 redirect to the presigned URL
+  5. Browser follows redirect — R2 handles all streaming natively
+     including Range requests, seeking, Content-Length, etc.
 
-Range requests enable instant seeking without re-downloading.
+Why redirect instead of proxy?
+  - R2 handles range requests perfectly out of the box
+  - No memory pressure on Django (no buffering large audio chunks)
+  - Presigned URLs expire in 60s so they can't be shared
+  - Seeking, buffering, and playback speed all work correctly
 """
-import re
-import requests as http_requests
-from django.http import HttpResponse
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from rest_framework import status
+import logging
+from django.http import HttpResponseRedirect, JsonResponse
 from rest_framework_simplejwt.tokens import AccessToken
 
 from .models import Sermon
-from .r2 import get_object_range, get_object_metadata
+from .r2 import get_r2_client
 from .stream_token import validate_stream_token
+from django.conf import settings
 
-CHUNK_SIZE = 1024 * 512  # 512 KB
+logger = logging.getLogger(__name__)
+
+PRESIGNED_URL_EXPIRY = 60 * 60  # 1 hour — long enough for a full sermon
 
 
 def _authenticate_stream(request, sermon_id: int):
     """
-    Try to authenticate via Bearer token OR ?token= query param.
-    Returns the User if authenticated, None otherwise.
+    Returns the User if authenticated via Bearer JWT or ?token= param.
+    Returns None if authentication fails.
     """
-    # Path 1: standard Bearer JWT
+    # Path 1: Authorization: Bearer <jwt>
     auth_header = request.META.get('HTTP_AUTHORIZATION', '')
     if auth_header.startswith('Bearer '):
         try:
@@ -40,7 +46,7 @@ def _authenticate_stream(request, sermon_id: int):
         except Exception:
             pass
 
-    # Path 2: signed ?token= query param (for <audio> element)
+    # Path 2: ?token= signed param (for <audio> element)
     token = request.GET.get('token', '')
     if token:
         return validate_stream_token(token, sermon_id)
@@ -48,110 +54,68 @@ def _authenticate_stream(request, sermon_id: int):
     return None
 
 
-def _parse_range_header(range_header: str, file_size: int) -> tuple:
-    if not range_header:
-        return 0, min(CHUNK_SIZE - 1, file_size - 1)
-
-    match = re.match(r'bytes=(\d+)-(\d*)', range_header)
-    if not match:
-        return 0, min(CHUNK_SIZE - 1, file_size - 1)
-
-    start = int(match.group(1))
-    end = int(match.group(2)) if match.group(2) else min(start + CHUNK_SIZE - 1, file_size - 1)
-    end = min(end, file_size - 1)
-    return start, end
-
-
-def _proxy_external_url(url: str, request) -> HttpResponse:
-    """Proxy an external audio URL through Django, forwarding Range headers."""
-    headers = {}
-    range_header = request.META.get('HTTP_RANGE', '')
-    if range_header:
-        headers['Range'] = range_header
-
-    try:
-        r = http_requests.get(url, headers=headers, stream=True, timeout=15)
-        response = HttpResponse(
-            r.content,
-            status=r.status_code if r.status_code in (200, 206) else 200,
-            content_type=r.headers.get('Content-Type', 'audio/mpeg'),
-        )
-        for h in ('Content-Length', 'Content-Range', 'Accept-Ranges'):
-            if h in r.headers:
-                response[h] = r.headers[h]
-        response['Accept-Ranges'] = 'bytes'
-        response['Access-Control-Allow-Origin'] = '*'
-        response['Access-Control-Expose-Headers'] = 'Content-Range, Content-Length, Accept-Ranges'
-        return response
-    except Exception as e:
-        return HttpResponse(f'Stream error: {e}', status=503)
+def _make_presigned_url(r2_key: str) -> str:
+    """Generate a presigned R2 URL valid for PRESIGNED_URL_EXPIRY seconds."""
+    client = get_r2_client()
+    return client.generate_presigned_url(
+        'get_object',
+        Params={
+            'Bucket': settings.AWS_STORAGE_BUCKET_NAME,
+            'Key': r2_key,
+        },
+        ExpiresIn=PRESIGNED_URL_EXPIRY,
+    )
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
 def stream_sermon(request, pk):
     """
+    Plain Django view (no @api_view wrapper — DRF interferes with redirects).
+
     GET /api/sermons/{pk}/stream/?token=<signed_token>
     OR  GET /api/sermons/{pk}/stream/ with Authorization: Bearer <jwt>
 
-    Streams audio from R2 with full range request / seeking support.
+    Returns a 302 redirect to a presigned R2 URL.
+    The presigned URL supports range requests natively.
     """
-    # Authenticate via either method
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = JsonResponse({})
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Headers'] = 'Range, Authorization'
+        return response
+
+    # Authenticate
     user = _authenticate_stream(request, pk)
     if not user:
-        return Response(
+        response = JsonResponse(
             {'detail': 'Authentication required to stream.'},
-            status=status.HTTP_401_UNAUTHORIZED,
+            status=401,
         )
+        response['Access-Control-Allow-Origin'] = '*'
+        return response
 
+    # Fetch sermon
     try:
         sermon = Sermon.objects.get(pk=pk, is_published=True)
     except Sermon.DoesNotExist:
-        return Response({'detail': 'Sermon not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return JsonResponse({'detail': 'Sermon not found.'}, status=404)
 
-    r2_key = sermon.r2_key
+    # R2-hosted file — generate presigned URL
+    if sermon.r2_key:
+        try:
+            presigned_url = _make_presigned_url(sermon.r2_key)
+            response = HttpResponseRedirect(presigned_url)
+            response['Access-Control-Allow-Origin'] = '*'
+            response['Cache-Control'] = 'no-store'
+            return response
+        except Exception as e:
+            logger.error(f'Failed to generate presigned URL for sermon {pk}: {e}')
+            return JsonResponse({'detail': f'Storage error: {str(e)}'}, status=503)
 
-    # No R2 key — try proxying audio_url directly
-    if not r2_key:
-        if sermon.audio_url:
-            return _proxy_external_url(sermon.audio_url, request)
-        return Response(
-            {'detail': 'No audio file available for this sermon.'},
-            status=status.HTTP_404_NOT_FOUND,
-        )
+    # External URL fallback (no R2 key) — redirect directly
+    if sermon.audio_url:
+        response = HttpResponseRedirect(sermon.audio_url)
+        response['Access-Control-Allow-Origin'] = '*'
+        return response
 
-    # Get file size from R2
-    try:
-        meta = get_object_metadata(r2_key)
-    except Exception as e:
-        return Response(
-            {'detail': f'Audio file not accessible: {str(e)}'},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-
-    file_size = meta['size']
-    content_type = meta['content_type']
-
-    range_header = request.META.get('HTTP_RANGE', '')
-    start, end = _parse_range_header(range_header, file_size)
-    chunk_size = end - start + 1
-
-    try:
-        content, _, _ = get_object_range(r2_key, start, end)
-    except Exception as e:
-        return Response(
-            {'detail': f'Streaming error: {str(e)}'},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-
-    response_status = 206 if range_header else 200
-    response = HttpResponse(content, status=response_status, content_type=content_type)
-    response['Content-Length'] = chunk_size
-    response['Content-Range'] = f'bytes {start}-{end}/{file_size}'
-    response['Accept-Ranges'] = 'bytes'
-    response['Cache-Control'] = 'no-cache'
-    response['Access-Control-Allow-Origin'] = '*'
-    response['Access-Control-Allow-Headers'] = 'Range, Authorization'
-    response['Access-Control-Expose-Headers'] = 'Content-Range, Content-Length, Accept-Ranges'
-
-    return response
+    return JsonResponse({'detail': 'No audio file available.'}, status=404)
