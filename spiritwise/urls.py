@@ -13,6 +13,9 @@ urlpatterns = [
     path('api/sermons/', include('apps.sermons.urls')),
     path('api/engagement/', include('apps.engagement.urls')),
     path('api/imports/', include('apps.imports.urls')),
+
+    # WordLookUp — WL2
+    path('api/wordlookup/', include('apps.wordlookup.urls')),
 ]
 
 if settings.DEBUG:

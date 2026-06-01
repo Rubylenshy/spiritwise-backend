@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'apps.sermons',
     'apps.engagement',
     'apps.imports',
+    'apps.wordlookup',
 ]
 
 SITE_ID = 1
@@ -165,10 +166,28 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
 # SSL required for Upstash rediss:// URLs
-if REDIS_URL.startswith('rediss://'):
-    import ssl
-    CELERY_BROKER_USE_SSL = {'ssl_cert_reqs': ssl.CERT_NONE}
-    CELERY_REDIS_BACKEND_USE_SSL = {'ssl_cert_reqs': ssl.CERT_NONE}
+_use_redis_cache = bool(
+    config('REDIS_URL', default='') and
+    not config('REDIS_URL', default='').startswith('redis://localhost') and
+    not config('REDIS_URL', default='').startswith('redis://127.0.0.1')
+)
+
+if _use_redis_cache:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {
+                'ssl_cert_reqs': None,
+            } if REDIS_URL.startswith('rediss://') else {},
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        }
+    }
 
 # ─── Storage (Cloudflare R2) ──────────────────────────────────────────────────
 
@@ -193,6 +212,15 @@ if USE_S3:
         'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
     }
 
+# ─── Bible APIs — WL2 ────────────────────────────────────────────────────────
+# Register at https://scripture.api.bible (free, 5 000 req/day, 70+ translations)
+# Register at https://api.esv.org (free, ESV only)
+
+BIBLE_API_KEY = config('BIBLE_API_KEY', default='')   # api.bible key
+ESV_API_KEY = config('ESV_API_KEY', default='')        # api.esv.org token
+
+# OpenAI key — used by the Whisper transcription fallback endpoint
+OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 
 # ─── Email ────────────────────────────────────────────────────────────────────
 
