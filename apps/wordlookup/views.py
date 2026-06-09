@@ -1,10 +1,20 @@
 """
-apps/wordlookup/views.py — WL2
+apps/wordlookup/views.py — WL3
+
+Changes from WL2:
+  ✓ Phrase lookups now fall through to the AI resolver when the local
+    thematic map doesn't match (WL3 core feature)
+  ✓ Lookup endpoint returns up to 3 results sorted by confidence
+  ✓ Each result carries confidence (0.0–1.0) and match_type
+    ("exact" | "inferred")
+  ✓ Saved verses endpoints added (WL3 stub, fully wired in WL4)
 
 Endpoints:
   POST /api/wordlookup/lookup/      → fetch verse(s) for a reference or phrase
   POST /api/wordlookup/transcribe/  → Whisper fallback for unsupported browsers
   GET  /api/wordlookup/history/     → paginated list of the user's past lookups
+  POST /api/wordlookup/saved/       → bookmark a verse (WL4)
+  GET  /api/wordlookup/saved/       → list saved verses (WL4)
 """
 
 import logging
@@ -16,16 +26,17 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
 from .bible_apis import fetch_verse_by_query, fetch_verse
-from .models import LookupHistory
+from .models import LookupHistory, SavedVerse
 from .serializers import (
     LookupRequestSerializer,
     LookupHistorySerializer,
+    SavedVerseSerializer,
 )
 
 logger = logging.getLogger(__name__)
 
+
 # ── Rate limiting helper ──────────────────────────────────────────────────────
-# Simple Redis-backed counter — reuses the existing Upstash Redis connection.
 
 def _whisper_rate_limit_key(user_id: int) -> str:
     from django.utils import timezone
@@ -40,7 +51,7 @@ def _check_whisper_limit(user_id: int, limit: int = 10) -> bool:
         current = cache.get(key, 0)
         return int(current) < limit
     except Exception:
-        return True  # Redis down — allow the request
+        return True
 
 
 def _increment_whisper_count(user_id: int):
@@ -52,7 +63,7 @@ def _increment_whisper_count(user_id: int):
         except ValueError:
             cache.set(key, 1, 60 * 60 * 25)
     except Exception:
-        pass  # Redis down — skip counting
+        pass
 
 
 # ── POST /api/wordlookup/lookup/ ──────────────────────────────────────────────
@@ -61,13 +72,20 @@ def _increment_whisper_count(user_id: int):
 @permission_classes([IsAuthenticated])
 def lookup(request):
     """
-    Accepts either an exact reference ("John 3:16") or a thematic phrase
-    ("the prodigal son").  For phrase lookups the AI resolver in WL3 will
-    be called; in WL2 we resolve known thematic phrases via a lightweight
-    local map and call the Bible API for the rest.
+    WL3: Full lookup pipeline.
+
+    For exact references → Bible API directly (instant, no AI).
+    For phrases → try local thematic map first (free, zero-latency),
+                  then fall through to Claude AI resolver if unmatched.
 
     Returns up to 3 results sorted by confidence:
-        [{ reference, text, version, source, confidence, match_type }, …]
+        {
+            query: str,
+            results: [{
+                reference, text, version, source,
+                confidence, match_type: "exact"|"inferred"
+            }]
+        }
     """
     serializer = LookupRequestSerializer(data=request.data)
     if not serializer.is_valid():
@@ -80,9 +98,9 @@ def lookup(request):
     query = reference or phrase
     results = []
 
-    # ── Exact reference path ───────────────────────────────────────────────────
+    # ── Path 1: Exact reference ────────────────────────────────────────────────
     if reference:
-        for version in versions[:3]:  # cap at 3 versions per request
+        for version in versions[:3]:
             verse_data = fetch_verse_by_query(reference, version=version)
             if verse_data:
                 results.append({
@@ -91,13 +109,13 @@ def lookup(request):
                     'match_type': 'exact',
                 })
 
-    # ── Thematic / phrase path ─────────────────────────────────────────────────
-    # WL2: use the same thematic map bibleParser.js uses on the frontend,
-    # mirrored here so the backend can resolve it independently.
-    # WL3 will replace this with the Claude AI resolver for open-ended phrases.
+    # ── Path 2: Thematic phrase ────────────────────────────────────────────────
     elif phrase:
+        # Step 1: Try the local thematic map (instant, free)
         resolved = _resolve_thematic_phrase(phrase)
+
         if resolved:
+            # Local map matched — fetch from Bible API
             for version in versions[:2]:
                 verse_data = fetch_verse(
                     resolved['book'],
@@ -112,12 +130,14 @@ def lookup(request):
                         'confidence': resolved.get('confidence', 0.9),
                         'match_type': 'inferred',
                     })
-        # WL3 note: if resolved is None here we'll call the AI resolver
+
+        else:
+            # Step 2: Local map didn't match — call Claude AI resolver (WL3)
+            results = _ai_resolve_and_fetch(phrase, versions)
 
     # ── Save to history (best-effort) ──────────────────────────────────────────
     if results:
         best = results[0]
-        # Truncate verse text for the snippet (first 200 chars)
         snippet = best.get('text', '')[:200]
         try:
             LookupHistory.objects.create(
@@ -137,6 +157,58 @@ def lookup(request):
     })
 
 
+def _ai_resolve_and_fetch(phrase: str, versions: list[str]) -> list[dict]:
+    """
+    WL3 core: Call Claude to identify passage(s), then fetch actual verse text.
+
+    Claude returns references (never verse text).
+    The Bible API fetches the actual words.
+    This prevents hallucinated scripture.
+    """
+    try:
+        from .ai_resolver import resolve_phrase
+        candidates = resolve_phrase(phrase)
+    except Exception as e:
+        logger.error('AI resolver import/call failed: %s', e)
+        return []
+
+    results = []
+
+    for candidate in candidates[:3]:
+        book = candidate['book']
+        chapter = candidate['chapter']
+        verse_start = candidate['verse_start']
+        verse_end = candidate.get('verse_end')
+        confidence = candidate['confidence']
+
+        # Try each requested version; break on first success per candidate
+        fetched = False
+        for version in versions[:2]:
+            verse_data = fetch_verse(book, chapter, verse_start, verse_end, version=version)
+            if verse_data:
+                results.append({
+                    **verse_data,
+                    'confidence': confidence,
+                    'match_type': 'inferred',
+                    'ai_reasoning': candidate.get('reasoning', ''),
+                })
+                fetched = True
+                break
+
+        # If primary version failed, try ESV as universal fallback
+        if not fetched:
+            verse_data = fetch_verse(book, chapter, verse_start, verse_end, version='ESV')
+            if verse_data:
+                results.append({
+                    **verse_data,
+                    'confidence': confidence * 0.85,  # slight penalty for version mismatch
+                    'match_type': 'inferred',
+                    'ai_reasoning': candidate.get('reasoning', ''),
+                })
+
+    return results
+
+
 # ── POST /api/wordlookup/transcribe/ ─────────────────────────────────────────
 
 @api_view(['POST'])
@@ -145,10 +217,7 @@ def transcribe(request):
     """
     Whisper-powered audio transcription fallback.
     Only called when the browser doesn't support Web Speech API.
-
     Rate limited: 10 requests / user / day.
-    Accepts: multipart/form-data with 'audio_file' field.
-    Returns: { transcript: string }
     """
     if not _check_whisper_limit(request.user.id):
         return Response(
@@ -165,7 +234,6 @@ def transcribe(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Validate file type
     allowed_types = ['audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav',
                      'audio/webm', 'audio/flac', 'audio/x-m4a']
     if audio_file.content_type not in allowed_types:
@@ -174,7 +242,6 @@ def transcribe(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # 25 MB limit
     if audio_file.size > 25 * 1024 * 1024:
         return Response(
             {'detail': 'File too large. Maximum size is 25 MB.'},
@@ -183,7 +250,7 @@ def transcribe(request):
 
     try:
         import openai
-        client = openai.OpenAI()   # reads OPENAI_API_KEY from env
+        client = openai.OpenAI()
         response = client.audio.transcriptions.create(
             model='whisper-1',
             file=(audio_file.name, audio_file.read(), audio_file.content_type),
@@ -228,9 +295,59 @@ def history(request):
     return paginator.get_paginated_response(serializer.data)
 
 
-# ── Thematic phrase resolver (WL2 version) ────────────────────────────────────
-# Mirrors the THEMATIC table in bibleParser.js so the backend can resolve
-# the same phrases independently.  WL3 will add AI for open-ended phrases.
+# ── POST/GET /api/wordlookup/saved/ ──────────────────────────────────────────
+# WL4 feature — endpoints are wired here so the URL routing is ready.
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def saved_verses(request):
+    """
+    GET  /api/wordlookup/saved/ — list bookmarked verses
+    POST /api/wordlookup/saved/ — bookmark a new verse
+    Body: { reference, verse_text, version, note_text? }
+    """
+    if request.method == 'GET':
+        qs = SavedVerse.objects.filter(user=request.user)
+        serializer = SavedVerseSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    # POST — save a verse
+    serializer = SavedVerseSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        verse, created = SavedVerse.objects.get_or_create(
+            user=request.user,
+            reference=serializer.validated_data['reference'],
+            version=serializer.validated_data.get('version', 'ESV'),
+            defaults={
+                'verse_text': serializer.validated_data.get('verse_text', ''),
+                'note_text': serializer.validated_data.get('note_text', ''),
+            },
+        )
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response(
+        SavedVerseSerializer(verse).data,
+        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+    )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_saved_verse(request, pk):
+    """DELETE /api/wordlookup/saved/{pk}/"""
+    try:
+        verse = SavedVerse.objects.get(pk=pk, user=request.user)
+    except SavedVerse.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    verse.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ── Thematic phrase resolver (local map — WL2, unchanged) ─────────────────────
 
 _THEMATIC_MAP = [
     {'patterns': ['sermon on the mount', 'beatitudes'],
@@ -241,7 +358,7 @@ _THEMATIC_MAP = [
      'book': 'Matthew', 'chapter': 14, 'verse': 13, 'verse_end': 21, 'confidence': 0.95},
     {'patterns': ['good samaritan'],
      'book': 'Luke', 'chapter': 10, 'verse': 25, 'verse_end': 37, 'confidence': 0.97},
-    {'patterns': ["lord's prayer", 'our father'],
+    {"patterns": ["lord's prayer", 'our father'],
      'book': 'Matthew', 'chapter': 6, 'verse': 9, 'verse_end': 13, 'confidence': 0.93},
     {'patterns': ['ten commandments'],
      'book': 'Exodus', 'chapter': 20, 'verse': 1, 'verse_end': 17, 'confidence': 0.95},
@@ -267,10 +384,6 @@ _THEMATIC_MAP = [
 
 
 def _resolve_thematic_phrase(phrase: str) -> dict | None:
-    """
-    Check if phrase matches any known thematic pattern.
-    Returns a resolution dict or None.
-    """
     phrase_lower = phrase.lower()
     for entry in _THEMATIC_MAP:
         for pattern in entry['patterns']:
