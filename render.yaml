@@ -77,8 +77,8 @@ services:
     buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate"
     startCommand: "gunicorn spiritwise.wsgi:application"
     healthCheckPath: /admin/login/
-    envVarGroups:
-      - spiritwise-shared
+    envVars:
+      - fromGroup: spiritwise-shared
 
   - type: worker
     name: spiritwise-celery-worker
@@ -86,8 +86,8 @@ services:
     plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "celery -A spiritwise worker -l info"
-    envVarGroups:
-      - spiritwise-shared
+    envVars:
+      - fromGroup: spiritwise-shared
 
   - type: worker
     name: spiritwise-celery-beat
@@ -95,5 +95,5 @@ services:
     plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "celery -A spiritwise beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
-    envVarGroups:
-      - spiritwise-shared
+    envVars:
+      - fromGroup: spiritwise-shared
