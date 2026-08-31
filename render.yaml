@@ -1,0 +1,99 @@
+# Render Blueprint — deploys the Django API, Celery worker, and Celery beat
+# together against one shared Postgres database.
+#
+# Setup:
+#   1. Push this repo to GitHub/GitLab.
+#   2. Render dashboard → New → Blueprint → select this repo.
+#   3. Render provisions spiritwise-db, spiritwise-backend, spiritwise-celery-worker,
+#      and spiritwise-celery-beat, wiring DATABASE_URL automatically.
+#   4. Fill in the "sync: false" env vars in the dashboard (they hold secrets,
+#      so they're deliberately left out of this file rather than committed):
+#        REDIS_URL              — a Redis/Upstash URL (see step 5)
+#        CORS_ALLOWED_ORIGINS   — your deployed frontend's https:// origin
+#        CSRF_TRUSTED_ORIGINS   — same origin as above
+#        AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_STORAGE_BUCKET_NAME /
+#        AWS_S3_ENDPOINT_URL / AWS_S3_CUSTOM_DOMAIN   — Cloudflare R2 credentials
+#        GOOGLE_SERVICE_ACCOUNT_JSON, BIBLE_API_KEY, ESV_API_KEY, OPENAI_API_KEY
+#   5. Redis isn't provisioned by this blueprint — create a free Upstash
+#      database (https://upstash.com) and paste its rediss:// URL into
+#      REDIS_URL. All three services share it (cache/throttling + Celery
+#      broker/result backend).
+#   6. After the first deploy, revisit ALLOWED_HOSTS/CORS_ALLOWED_ORIGINS/
+#      CSRF_TRUSTED_ORIGINS with the real onrender.com / custom domain.
+
+envVarGroups:
+  - name: spiritwise-shared
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: .onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: CSRF_TRUSTED_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: spiritwise-db
+          property: connectionString
+      - key: REDIS_URL
+        sync: false
+      - key: USE_S3
+        value: "True"
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_STORAGE_BUCKET_NAME
+        sync: false
+      - key: AWS_S3_REGION_NAME
+        value: auto
+      - key: AWS_S3_ENDPOINT_URL
+        sync: false
+      - key: AWS_S3_CUSTOM_DOMAIN
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: BIBLE_API_KEY
+        sync: false
+      - key: ESV_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+databases:
+  - name: spiritwise-db
+    plan: free # expires after Render's free-tier window — move to `starter` before that matters
+    databaseName: spiritwise
+    user: spiritwise
+
+services:
+  - type: web
+    name: spiritwise-backend
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate"
+    startCommand: "gunicorn spiritwise.wsgi:application"
+    healthCheckPath: /admin/login/
+    envVarGroups:
+      - spiritwise-shared
+
+  - type: worker
+    name: spiritwise-celery-worker
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "celery -A spiritwise worker -l info"
+    envVarGroups:
+      - spiritwise-shared
+
+  - type: worker
+    name: spiritwise-celery-beat
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "celery -A spiritwise beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
+    envVarGroups:
+      - spiritwise-shared

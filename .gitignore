@@ -3,6 +3,7 @@ __pycache__
 /.env.example
 
 venv
+/staticfiles
 
 # AI
 .agents
