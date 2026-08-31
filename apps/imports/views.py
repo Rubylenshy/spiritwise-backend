@@ -7,6 +7,7 @@ On upload:
   3. Album art (if present) uploaded to R2 as thumbnail
   4. Sermon record created with all extracted + submitted metadata
 """
+import csv
 import io
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -19,6 +20,8 @@ from apps.sermons.audio_meta import extract_metadata
 from .models import CloudImportJob
 from .serializers import ImportJobSerializer
 from django.conf import settings
+from django.db import transaction
+from django.utils.dateparse import parse_date
 import uuid
 
 
@@ -249,3 +252,146 @@ def delete_sermon_audio(request, sermon_id):
         sermon.save(update_fields=['r2_key', 'audio_url'])
 
     return Response({'detail': 'Audio removed. Upload a replacement via the import page.'})
+
+
+_TRUE_STRINGS = {'1', 'true', 'yes', 'y'}
+_FALSE_STRINGS = {'0', 'false', 'no', 'n'}
+
+
+def _apply_csv_row(row):
+    """
+    Create or update one Sermon from a CSV row dict.
+    Returns (sermon, created: bool). Raises ValueError on bad input.
+    """
+    row = {k.strip(): (v or '').strip() for k, v in row.items() if k}
+
+    sermon = None
+    row_id = row.get('id')
+    row_slug = row.get('slug')
+    if row_id:
+        try:
+            sermon = Sermon.objects.get(pk=int(row_id))
+        except (Sermon.DoesNotExist, ValueError):
+            raise ValueError(f"No sermon with id '{row_id}'.")
+    elif row_slug:
+        try:
+            sermon = Sermon.objects.get(slug=row_slug)
+        except Sermon.DoesNotExist:
+            raise ValueError(f"No sermon with slug '{row_slug}'.")
+
+    created = sermon is None
+    if created and not row.get('title'):
+        raise ValueError('title is required to create a new sermon.')
+
+    if created:
+        sermon = Sermon(title=row['title'])
+    elif row.get('title'):
+        sermon.title = row['title']
+
+    if row.get('speaker'):
+        sermon.speaker = row['speaker']
+    if row.get('description'):
+        sermon.description = row['description']
+    if row.get('scripture_reference'):
+        sermon.scripture_reference = row['scripture_reference']
+    if row.get('audio_url'):
+        sermon.audio_url = row['audio_url']
+
+    if row.get('sermon_date'):
+        parsed = parse_date(row['sermon_date'])
+        if not parsed:
+            raise ValueError(f"sermon_date '{row['sermon_date']}' is not in YYYY-MM-DD format.")
+        sermon.sermon_date = parsed
+
+    if row.get('is_published'):
+        val = row['is_published'].lower()
+        if val in _TRUE_STRINGS:
+            sermon.is_published = True
+        elif val in _FALSE_STRINGS:
+            sermon.is_published = False
+        else:
+            raise ValueError(f"is_published '{row['is_published']}' must be true/false.")
+
+    if row.get('series'):
+        series, _ = Series.objects.get_or_create(title=row['series'])
+        sermon.series = series
+
+    sermon.save()
+
+    if row.get('tags'):
+        tag_names = [t.strip() for t in row['tags'].split(',') if t.strip()]
+        tags = [Tag.objects.get_or_create(name=name)[0] for name in tag_names]
+        sermon.tags.set(tags)
+
+    return sermon, created
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def bulk_import_csv(request):
+    """
+    POST /api/imports/bulk-csv/
+    multipart/form-data, field 'csv_file'.
+
+    Bulk create/update Sermon metadata from a CSV. Each row is applied in its
+    own transaction so one bad row doesn't block the rest of the batch.
+
+    Columns (header row required, all optional except title-for-create):
+      id, slug          — match an existing sermon to update (by pk or slug)
+      title             — required when creating a new sermon
+      speaker, description, scripture_reference, audio_url
+      series            — series title, get-or-create
+      tags              — comma-separated tag names, replaces existing tags
+      sermon_date       — YYYY-MM-DD
+      is_published      — true/false
+    """
+    if not _is_admin(request.user):
+        return Response({'detail': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    csv_file = request.FILES.get('csv_file')
+    if not csv_file:
+        return Response({'detail': 'csv_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        decoded = csv_file.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return Response({'detail': 'File must be UTF-8 encoded CSV.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    if not reader.fieldnames:
+        return Response({'detail': 'CSV has no header row.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    results = []
+    created_count = 0
+    updated_count = 0
+    failed_count = 0
+
+    for line_num, row in enumerate(reader, start=2):  # header is line 1
+        try:
+            with transaction.atomic():
+                sermon, created = _apply_csv_row(row)
+            if created:
+                created_count += 1
+            else:
+                updated_count += 1
+            results.append({
+                'row': line_num,
+                'status': 'created' if created else 'updated',
+                'sermon_id': sermon.id,
+                'title': sermon.title,
+            })
+        except Exception as e:
+            failed_count += 1
+            results.append({
+                'row': line_num,
+                'status': 'error',
+                'error': str(e),
+            })
+
+    return Response({
+        'total': len(results),
+        'created': created_count,
+        'updated': updated_count,
+        'failed': failed_count,
+        'results': results,
+    })
