@@ -1,0 +1,47 @@
+# fly.toml app configuration file generated for spiritwise-backend on 2026-09-19T18:53:51+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'spiritwise-backend'
+primary_region = 'fra'
+console_command = '/code/manage.py shell'
+
+[build]
+[deploy]
+  release_command = 'python manage.py migrate --noinput'
+
+[env]
+  AWS_S3_REGION_NAME = 'auto'
+  DEBUG = 'False'
+  PORT = '8000'
+  USE_S3 = 'True'
+
+[processes]
+  app = 'gunicorn --bind :8000 --workers 2 spiritwise.wsgi'
+  worker = 'celery -A spiritwise worker -B -l info --concurrency 2 --scheduler django_celery_beat.schedulers:DatabaseScheduler --without-gossip --without-mingle --without-heartbeat'
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/health/'
+
+[[vm]]
+  memory = '512mb'
+  cpus = 1
+  memory_mb = 512
+  processes = ['app', 'worker']
+
+[[statics]]
+  guest_path = '/code/static'
+  url_prefix = '/static/'

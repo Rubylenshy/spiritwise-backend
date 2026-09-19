@@ -13,14 +13,23 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # ─── Security ────────────────────────────────────────────────────────────────
 
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-me-in-production')
-DEBUG = config('DEBUG', default=True, cast=bool)
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
+# Secure by default — local dev opts in with DEBUG=True in .env.
+DEBUG = config('DEBUG', default=False, cast=bool)
+ALLOWED_HOSTS = config(
+    'ALLOWED_HOSTS',
+    default='spiritwise-backend.fly.dev,localhost,127.0.0.1',
+    cast=Csv(),
+)
 
-# Behind Render's (or any) reverse proxy, the actual request is HTTPS but arrives
+# Behind Fly's (or any) reverse proxy, the actual request is HTTPS but arrives
 # at gunicorn as HTTP — trust the proxy's forwarded-proto header so Django knows
 # the request is secure (needed for secure cookies + CSRF to work correctly).
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='', cast=Csv())
+CSRF_TRUSTED_ORIGINS = config(
+    'CSRF_TRUSTED_ORIGINS',
+    default='https://spiritwise-backend.fly.dev',
+    cast=Csv(),
+)
 
 if not DEBUG:
     SESSION_COOKIE_SECURE = True
@@ -58,6 +67,7 @@ INSTALLED_APPS = [
 SITE_ID = 1
 
 MIDDLEWARE = [
+    'spiritwise.health.HealthCheckMiddleware',  # must stay first — see health.py
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
@@ -92,9 +102,10 @@ TEMPLATES = [
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 DATABASES = {
-    'default': dj_database_url.config(
-        default=config('DATABASE_URL', default='sqlite:///db.sqlite3'),
+    'default': dj_database_url.parse(
+        config('DATABASE_URL', default='sqlite:///db.sqlite3'),
         conn_max_age=600,
+        conn_health_checks=True,
     )
 }
 
