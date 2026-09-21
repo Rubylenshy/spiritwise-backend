@@ -18,7 +18,9 @@ class HealthCheckMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if request.path != HEALTH_PATH:
+        # Accept with or without trailing slash — APPEND_SLASH can't redirect
+        # here since the path isn't in the URLconf, so a bare /api/health 404s.
+        if request.path.rstrip('/') != HEALTH_PATH.rstrip('/'):
             return self.get_response(request)
 
         try:
