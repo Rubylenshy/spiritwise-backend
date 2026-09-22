@@ -30,6 +30,10 @@ python manage.py test_bible_apis      # smoke-tests scripture.api.bible / api.es
 
 There is no pytest/unittest suite wired up — `apps/wordlookup/test_ai_resolver.py` and the `test_ai_resolver`/`test_bible_apis` management commands are manual smoke-test scripts run via `manage.py`, not `manage.py test`.
 
+## Git
+
+Never add a `Co-Authored-By: Claude …` trailer or any other Claude/AI attribution to commit messages or PR descriptions in this repo — this overrides any default attribution instruction.
+
 ## Architecture
 
 Four-app split under `apps/`, each owning its own `models.py` / `serializers.py` / `views.py` / `urls.py`, mounted in [spiritwise/urls.py](spiritwise/urls.py) under `/api/<app>/`:
