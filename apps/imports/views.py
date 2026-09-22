@@ -9,13 +9,16 @@ On upload:
 """
 import csv
 import io
+import os
+from botocore.exceptions import ClientError
+from django.core.files.base import ContentFile
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.sermons.models import Sermon, Series, Tag
-from apps.sermons.r2 import upload_audio, delete_audio, get_r2_client, build_public_url
+from apps.sermons.r2 import upload_audio, delete_audio, get_r2_client, build_public_url, open_object
 from apps.sermons.audio_meta import extract_metadata
 from .models import CloudImportJob
 from .serializers import ImportJobSerializer
@@ -258,6 +261,22 @@ _TRUE_STRINGS = {'1', 'true', 'yes', 'y'}
 _FALSE_STRINGS = {'0', 'false', 'no', 'n'}
 
 
+def _probe_r2_audio(key: str) -> dict:
+    """Read duration/tags/cover art from an object already in R2 (ranged reads, no full download)."""
+    try:
+        with open_object(key) as f:
+            return extract_metadata(f)
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') in ('404', 'NoSuchKey', 'NotFound'):
+            raise ValueError(f"r2_key '{key}' was not found in the bucket.")
+        raise
+
+
+def _title_from_key(key: str) -> str:
+    stem = os.path.splitext(os.path.basename(key))[0]
+    return stem.replace('-', ' ').replace('_', ' ').strip()
+
+
 def _apply_csv_row(row):
     """
     Create or update one Sermon from a CSV row dict.
@@ -268,6 +287,7 @@ def _apply_csv_row(row):
     sermon = None
     row_id = row.get('id')
     row_slug = row.get('slug')
+    r2_key = row.get('r2_key', '').lstrip('/')
     if row_id:
         try:
             sermon = Sermon.objects.get(pk=int(row_id))
@@ -278,13 +298,21 @@ def _apply_csv_row(row):
             sermon = Sermon.objects.get(slug=row_slug)
         except Sermon.DoesNotExist:
             raise ValueError(f"No sermon with slug '{row_slug}'.")
+    elif r2_key:
+        # Match on the audio object so re-running the same CSV updates instead of duplicating.
+        sermon = Sermon.objects.filter(r2_key=r2_key).first()
 
     created = sermon is None
-    if created and not row.get('title'):
-        raise ValueError('title is required to create a new sermon.')
+    if created and not (row.get('title') or r2_key):
+        raise ValueError('title (or r2_key) is required to create a new sermon.')
+
+    # Only read the audio when it's new to this sermon, or its duration never got filled in.
+    meta = None
+    if r2_key and (created or r2_key != sermon.r2_key or not sermon.duration_seconds):
+        meta = _probe_r2_audio(r2_key)
 
     if created:
-        sermon = Sermon(title=row['title'])
+        sermon = Sermon(title=row.get('title') or (meta and meta['title']) or _title_from_key(r2_key))
     elif row.get('title'):
         sermon.title = row['title']
 
@@ -316,7 +344,22 @@ def _apply_csv_row(row):
         series, _ = Series.objects.get_or_create(title=row['series'])
         sermon.series = series
 
+    if meta is not None:
+        sermon.r2_key = r2_key
+        if not row.get('audio_url'):
+            sermon.audio_url = build_public_url(r2_key)
+        sermon.duration_seconds = meta['duration_seconds'] or sermon.duration_seconds
+        # CSV values win; embedded tags only fill what's still blank.
+        sermon.speaker = sermon.speaker or meta['artist']
+        sermon.description = sermon.description or meta['comment']
+        if not sermon.sermon_date and meta['date']:
+            sermon.sermon_date = parse_date(meta['date'][:10])  # None for year-only tags
+
     sermon.save()
+
+    if meta and meta['cover_art'] and not sermon.thumbnail:
+        ext = {'image/png': 'png', 'image/webp': 'webp'}.get(meta['cover_mime'], 'jpg')
+        sermon.thumbnail.save(f'thumb_{sermon.id}.{ext}', ContentFile(meta['cover_art']), save=True)
 
     if row.get('tags'):
         tag_names = [t.strip() for t in row['tags'].split(',') if t.strip()]
@@ -338,7 +381,11 @@ def bulk_import_csv(request):
 
     Columns (header row required, all optional except title-for-create):
       id, slug          — match an existing sermon to update (by pk or slug)
-      title             — required when creating a new sermon
+      r2_key            — object key of audio already in the bucket (e.g. sermons/foo.m4a).
+                          Also matches an existing sermon when id/slug are blank, so a
+                          re-run updates rather than duplicates. Duration, cover art and
+                          blank speaker/date/description are read from the file's tags.
+      title             — required when creating a new sermon (unless r2_key is given)
       speaker, description, scripture_reference, audio_url
       series            — series title, get-or-create
       tags              — comma-separated tag names, replaces existing tags
