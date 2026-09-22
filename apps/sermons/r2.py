@@ -2,6 +2,7 @@
 Cloudflare R2 utility functions.
 All audio file operations go through here.
 """
+import io
 import uuid
 import os
 import boto3
@@ -109,6 +110,55 @@ def get_object_range(key: str, start: int, end: int) -> tuple:
         total_size = end + 1
 
     return content, content_type, total_size
+
+
+class _R2ObjectReader(io.RawIOBase):
+    """Seekable, read-only view of an R2 object — every read is a ranged GET."""
+
+    def __init__(self, key: str):
+        self.name = key  # lets mutagen use the extension when sniffing the format
+        self._key = key
+        self._client = get_r2_client()
+        head = self._client.head_object(Bucket=settings.AWS_STORAGE_BUCKET_NAME, Key=key)
+        self._size = head['ContentLength']
+        self._pos = 0
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self._pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self._size}[whence]
+        self._pos = max(0, base + offset)
+        return self._pos
+
+    def readinto(self, buffer):
+        if self._pos >= self._size or not len(buffer):
+            return 0
+        end = min(self._pos + len(buffer), self._size) - 1
+        data = self._client.get_object(
+            Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+            Key=self._key,
+            Range=f'bytes={self._pos}-{end}',
+        )['Body'].read()
+        buffer[:len(data)] = data
+        self._pos += len(data)
+        return len(data)
+
+
+def open_object(key: str, buffer_size: int = 256 * 1024):
+    """
+    Open an R2 object as a seekable file without downloading it.
+    Reads are fetched in `buffer_size` chunks on demand, so tag/duration parsing
+    touches a few hundred KB instead of the whole file. Raises
+    botocore ClientError (404) if the key doesn't exist.
+    """
+    return io.BufferedReader(_R2ObjectReader(key), buffer_size=buffer_size)
 
 
 def get_object_metadata(key: str) -> dict:
