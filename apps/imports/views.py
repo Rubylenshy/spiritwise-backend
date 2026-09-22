@@ -1,7 +1,11 @@
 """
-Import views — synchronous R2 upload with audio metadata extraction.
+Import views — R2 uploads with audio metadata extraction.
 
-On upload:
+Preferred flow (large files): presign_upload → browser PUTs straight to R2 →
+finalize_upload probes the stored object and creates the Sermon. The app server
+never handles the audio bytes, so there's no request-size or worker-timeout limit.
+
+Legacy synchronous flow (upload_sermon):
   1. mutagen extracts duration, tags, album art from the audio file
   2. Audio uploaded to R2
   3. Album art (if present) uploaded to R2 as thumbnail
@@ -18,7 +22,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.sermons.models import Sermon, Series, Tag
-from apps.sermons.r2 import upload_audio, delete_audio, get_r2_client, build_public_url, open_object
+from apps.sermons.r2 import (
+    AUDIO_KEY_PREFIX, upload_audio, delete_audio, get_r2_client, build_public_url,
+    open_object, presign_audio_upload,
+)
 from apps.sermons.audio_meta import extract_metadata
 from .models import CloudImportJob
 from .serializers import ImportJobSerializer
@@ -220,6 +227,137 @@ def upload_sermon(request):
         job.mark_failed(str(e))
         return Response(
             {'detail': f'Upload failed: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def presign_upload(request):
+    """
+    POST /api/imports/presign/  { filename }
+    Returns { key, upload_url, content_type }. The client PUTs the file to
+    upload_url with that exact Content-Type, then calls /imports/finalize/.
+    """
+    if not _is_admin(request.user):
+        return Response({'detail': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    filename = str(request.data.get('filename', '')).strip()
+    if not filename:
+        return Response({'detail': 'filename is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response(presign_audio_upload(filename))
+
+
+def _upload_response(job, sermon, http_status):
+    return Response({
+        'job_id':           job.id if job else None,
+        'sermon_id':        sermon.id,
+        'sermon_title':     sermon.title,
+        'audio_url':        sermon.audio_url,
+        'r2_key':           sermon.r2_key,
+        'duration_seconds': sermon.duration_seconds,
+        'duration_display': sermon.duration_display,
+        'has_thumbnail':    bool(sermon.thumbnail),
+        'message':          'Upload complete. Sermon is now live in the library.',
+    }, status=http_status)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def finalize_upload(request):
+    """
+    POST /api/imports/finalize/
+    JSON: r2_key (from /imports/presign/), sermon_title, sermon_speaker,
+          sermon_series, sermon_date, sermon_tags, description, scripture_ref
+
+    Reads duration/tags/cover art from the object already in R2 (ranged reads)
+    and creates the Sermon. Submitted fields win; blank speaker/date/description
+    fall back to the file's embedded tags. Safe to retry — a key that already
+    has a sermon returns that sermon.
+    """
+    if not _is_admin(request.user):
+        return Response({'detail': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    r2_key = str(request.data.get('r2_key', '')).strip()
+    if not r2_key.startswith(AUDIO_KEY_PREFIX) or '..' in r2_key:
+        return Response({'detail': 'A valid r2_key is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    title = str(request.data.get('sermon_title', '')).strip()
+    if not title:
+        return Response({'detail': 'sermon_title is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    existing = Sermon.objects.filter(r2_key=r2_key).first()
+    if existing:
+        return _upload_response(getattr(existing, 'import_job', None), existing, status.HTTP_200_OK)
+
+    sermon_date = None
+    if request.data.get('sermon_date'):
+        sermon_date = parse_date(str(request.data['sermon_date']))
+        if not sermon_date:
+            return Response({'detail': 'sermon_date must be YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    speaker = str(request.data.get('sermon_speaker', '')).strip()
+    job = CloudImportJob.objects.create(
+        requested_by=request.user,
+        source='local',
+        sermon_title=title,
+        sermon_speaker=speaker,
+        status='processing',
+        progress_pct=90,
+    )
+
+    try:
+        meta = _probe_r2_audio(r2_key)
+
+        series = None
+        series_id = request.data.get('sermon_series')
+        if series_id:
+            series = Series.objects.filter(pk=series_id).first()
+
+        if not sermon_date and meta['date']:
+            sermon_date = parse_date(meta['date'][:10])  # None for year-only tags
+
+        with transaction.atomic():
+            sermon = Sermon.objects.create(
+                title=title,
+                speaker=speaker or meta['artist'],
+                series=series,
+                description=str(request.data.get('description', '')).strip() or meta['comment'],
+                scripture_reference=str(request.data.get('scripture_ref', '')).strip(),
+                sermon_date=sermon_date,
+                audio_url=build_public_url(r2_key),
+                r2_key=r2_key,
+                duration_seconds=meta['duration_seconds'] or 0,
+                uploaded_by=request.user,
+                is_published=True,
+            )
+
+            tags_raw = str(request.data.get('sermon_tags', ''))
+            for tag_name in [t.strip() for t in tags_raw.split(',') if t.strip()]:
+                sermon.tags.add(Tag.objects.get_or_create(name=tag_name)[0])
+
+        if meta['cover_art']:
+            try:
+                ext = {'image/png': 'png', 'image/webp': 'webp'}.get(meta['cover_mime'], 'jpg')
+                sermon.thumbnail.save(f'thumb_{sermon.id}.{ext}', ContentFile(meta['cover_art']), save=True)
+            except Exception:
+                pass  # Cover art is non-fatal
+
+        job.sermon = sermon
+        job.status = 'complete'
+        job.progress_pct = 100
+        job.save(update_fields=['sermon', 'status', 'progress_pct', 'updated_at'])
+
+        return _upload_response(job, sermon, status.HTTP_201_CREATED)
+
+    except ValueError as e:  # key missing from the bucket — the PUT never landed
+        job.mark_failed(str(e))
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        job.mark_failed(str(e))
+        return Response(
+            {'detail': f'Finalize failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 

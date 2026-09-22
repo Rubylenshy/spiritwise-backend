@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import StreakRecord, QuestionAnswer, LeaderboardEntry
+from .models import StreakRecord, QuestionAnswer
 
 
 @admin.register(StreakRecord)
@@ -16,9 +16,3 @@ class QuestionAnswerAdmin(admin.ModelAdmin):
     search_fields = ['user__username', 'sermon__title']
     readonly_fields = ['created_at', 'updated_at']
 
-
-@admin.register(LeaderboardEntry)
-class LeaderboardEntryAdmin(admin.ModelAdmin):
-    list_display = ['rank', 'user', 'xp', 'period', 'week_start']
-    list_filter = ['period']
-    search_fields = ['user__username']

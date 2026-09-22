@@ -66,27 +66,3 @@ class QuestionAnswer(models.Model):
     def __str__(self):
         return f'{self.user.username} → Q{self.question.order} ({self.sermon.title})'
 
-
-class LeaderboardEntry(models.Model):
-    """
-    Weekly snapshot computed by a periodic Celery task.
-    Avoids expensive GROUP BY queries on every leaderboard page load.
-    """
-    PERIOD_CHOICES = [('weekly', 'Weekly'), ('monthly', 'Monthly'), ('all_time', 'All Time')]
-
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='leaderboard_entries',
-    )
-    period = models.CharField(max_length=10, choices=PERIOD_CHOICES, default='weekly')
-    xp = models.PositiveIntegerField(default=0)
-    rank = models.PositiveIntegerField(default=0)
-    week_start = models.DateField(null=True, blank=True)
-
-    class Meta:
-        ordering = ['rank']
-        unique_together = ('user', 'period', 'week_start')
-
-    def __str__(self):
-        return f'#{self.rank} {self.user.username} — {self.xp} XP ({self.period})'

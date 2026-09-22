@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-SpiritWise — Django 5 + Django REST Framework backend for a sermon-listening / Bible-study app. JWT auth (SimpleJWT), PostgreSQL, Celery + Redis for background work, Cloudflare R2 for audio storage.
+SpiritWise — Django 5 + Django REST Framework backend for a sermon-listening / Bible-study app. JWT auth (SimpleJWT), PostgreSQL, Redis as the cache, Cloudflare R2 for audio storage. There is no background worker — everything runs in the request.
 
 The frontend (React + Vite + Tailwind, calling this API from `http://localhost:5173` in dev per `CORS_ALLOWED_ORIGINS`) lives in a sibling repo at [`../spiritwise`](../spiritwise) — see [`../spiritwise/CLAUDE.md`](../spiritwise/CLAUDE.md) for its conventions.
 
@@ -20,10 +20,6 @@ cp .env.example .env                            # then set SECRET_KEY, DATABASE_
 python manage.py migrate
 python manage.py runserver                      # http://localhost:8000/api/
 
-# Celery (needed for Drive imports + leaderboard refresh + streak reset)
-celery -A spiritwise worker -l info
-celery -A spiritwise beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-
 # Seed sample data
 python manage.py seed_data
 
@@ -34,14 +30,18 @@ python manage.py test_bible_apis      # smoke-tests scripture.api.bible / api.es
 
 There is no pytest/unittest suite wired up — `apps/wordlookup/test_ai_resolver.py` and the `test_ai_resolver`/`test_bible_apis` management commands are manual smoke-test scripts run via `manage.py`, not `manage.py test`.
 
+## Git
+
+Never add a `Co-Authored-By: Claude …` trailer or any other Claude/AI attribution to commit messages or PR descriptions in this repo — this overrides any default attribution instruction.
+
 ## Architecture
 
 Four-app split under `apps/`, each owning its own `models.py` / `serializers.py` / `views.py` / `urls.py`, mounted in [spiritwise/urls.py](spiritwise/urls.py) under `/api/<app>/`:
 
 - **users** — custom `User` model (`AUTH_USER_MODEL = 'users.User'`), JWT register/login/logout/refresh, `XPTransaction`.
 - **sermons** — `Sermon`, `Series`, `Tag`, `SermonQuestion`, `ListenHistory`. Audio is served through a signed-URL indirection, not directly: `SermonDetailSerializer.get_audio_signed_url()` ([apps/sermons/serializers.py](apps/sermons/serializers.py)) calls `apps/sermons/stream_token.py` to mint a short-lived token, and the client fetches `/api/sermons/<id>/stream/?token=...` rather than the R2 URL directly. Falls back to the raw `audio_url`/`audio_file.url` if token generation fails.
-- **engagement** — streaks, XP, reflection answers, leaderboard. `tasks.py` has the Celery jobs (leaderboard refresh, streak reset) that require `celery beat` running to fire on schedule.
-- **imports** — admin-only pipeline: `CloudImportJob` model, Celery task chain that pulls from Google Drive, uploads to R2, and creates a `Sermon`.
+- **engagement** — streaks, XP, reflection answers, leaderboard. The leaderboard is computed live per request (weekly/monthly sum `XPTransaction`, all-time uses `User.xp_points`). `User.current_streak` is only rewritten on the user's next activity, so display code must read `User.live_streak`, which reports 0 for a lapsed streak.
+- **imports** — admin-only uploads. Browser uploads go `POST /imports/presign/` → browser PUTs straight to R2 → `POST /imports/finalize/` (probes tags/duration/cover via ranged reads, creates the `Sermon`). R2 bucket CORS must allow the frontend origins for the PUT — `python manage.py setup_r2_cors`. Also `bulk-csv/` for metadata, and a legacy synchronous `upload/`. `CloudImportJob` is the audit record.
 - **wordlookup** ("WordLookUp" feature, in-progress — see WL1–WL4 markers below) — Bible reference/phrase lookup, history, saved verses, Whisper transcription fallback.
 
 ### WordLookUp lookup pipeline (apps/wordlookup/views.py)

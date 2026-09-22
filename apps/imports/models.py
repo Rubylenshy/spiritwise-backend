@@ -20,8 +20,8 @@ class ImportStatus(models.TextChoices):
 
 class CloudImportJob(models.Model):
     """
-    Represents a single import task kicked off by an admin user.
-    A Celery worker picks it up and transitions it through statuses.
+    Audit record for one admin upload (see apps/imports/views.py), moved
+    through statuses as the upload is finalized.
     """
     requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
