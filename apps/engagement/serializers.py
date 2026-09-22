@@ -1,6 +1,5 @@
 from rest_framework import serializers
-from apps.users.serializers import UserPublicSerializer
-from .models import StreakRecord, QuestionAnswer, LeaderboardEntry
+from .models import StreakRecord, QuestionAnswer
 
 
 class StreakRecordSerializer(serializers.ModelSerializer):
@@ -38,12 +37,3 @@ class QuestionAnswerSerializer(serializers.ModelSerializer):
         fields = ['id', 'question', 'question_text', 'sermon', 'sermon_title', 'answer_text', 'created_at']
         read_only_fields = ['id', 'created_at', 'question_text', 'sermon_title']
 
-
-class LeaderboardEntrySerializer(serializers.ModelSerializer):
-    username = serializers.CharField(source='user.username', read_only=True)
-    user_id = serializers.IntegerField(source='user.id', read_only=True)
-    streak = serializers.IntegerField(source='user.current_streak', read_only=True)
-
-    class Meta:
-        model = LeaderboardEntry
-        fields = ['rank', 'user_id', 'username', 'streak', 'xp', 'period', 'week_start']

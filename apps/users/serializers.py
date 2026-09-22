@@ -9,6 +9,7 @@ User = get_user_model()
 class UserPublicSerializer(serializers.ModelSerializer):
     """Minimal user data returned in auth responses and embeds."""
     avatar = serializers.SerializerMethodField()
+    current_streak = serializers.IntegerField(source='live_streak', read_only=True)
 
     def get_avatar(self, obj):
         if not obj.avatar:

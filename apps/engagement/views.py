@@ -1,3 +1,8 @@
+from datetime import timedelta
+
+from django.contrib.auth import get_user_model
+from django.db.models import F, Q, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -5,14 +10,15 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.sermons.models import ListenHistory
-from .models import StreakRecord, QuestionAnswer, LeaderboardEntry, ActivityType
+from .models import StreakRecord, QuestionAnswer, ActivityType
 from .serializers import (
     EngagementStatsSerializer,
     LogActivitySerializer,
     QuestionAnswerSerializer,
-    LeaderboardEntrySerializer,
     StreakRecordSerializer,
 )
+
+User = get_user_model()
 
 
 @api_view(['GET'])
@@ -46,7 +52,7 @@ def stats(request):
     )
 
     data = {
-        'current_streak': user.current_streak,
+        'current_streak': user.live_streak,
         'longest_streak': user.longest_streak,
         'xp_points': user.xp_points,
         'daily_goal_minutes': user.daily_goal_minutes,
@@ -141,36 +147,57 @@ def question_answers(request):
     }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+def _period_start(period, today):
+    """First day counted for a leaderboard period; None means all time."""
+    if period == 'weekly':
+        return today - timedelta(days=today.weekday())  # Monday
+    if period == 'monthly':
+        return today.replace(day=1)
+    return None
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def leaderboard(request):
     """
-    GET /api/engagement/leaderboard/?period=weekly
-    Returns top 50 users for the given period.
+    GET /api/engagement/leaderboard/?period=weekly|monthly|all_time
+    Returns the top 50 users for the period, computed live: weekly/monthly sum
+    the XP ledger since the period start, all-time uses user.xp_points.
+    Tied XP shares a rank (1, 2, 2, 4).
     """
     period = request.query_params.get('period', 'weekly')
     if period not in ('weekly', 'monthly', 'all_time'):
         period = 'weekly'
 
-    entries = (
-        LeaderboardEntry.objects
-        .filter(period=period)
-        .select_related('user')
-        .order_by('rank')[:50]
-    )
+    start = _period_start(period, timezone.now().date())
+    users = User.objects.filter(is_active=True)
+    if start:
+        users = users.annotate(period_xp=Coalesce(
+            Sum('xp_transactions__points', filter=Q(xp_transactions__created_at__date__gte=start)), 0,
+        ))
+    else:
+        users = users.annotate(period_xp=F('xp_points'))
+    ranked = users.filter(period_xp__gt=0)
 
-    # Find the current user's rank
-    try:
-        my_entry = LeaderboardEntry.objects.get(user=request.user, period=period)
-        my_rank = my_entry.rank
-        my_xp = my_entry.xp
-    except LeaderboardEntry.DoesNotExist:
-        my_rank = None
-        my_xp = request.user.xp_points
+    entries = []
+    for i, user in enumerate(ranked.order_by('-period_xp', 'id')[:50]):
+        rank = entries[-1]['rank'] if entries and entries[-1]['xp'] == user.period_xp else i + 1
+        entries.append({
+            'rank': rank,
+            'user_id': user.id,
+            'username': user.username,
+            'streak': user.live_streak,
+            'xp': user.period_xp,
+            'period': period,
+            'week_start': start,
+        })
+
+    my_xp = ranked.filter(pk=request.user.pk).values_list('period_xp', flat=True).first()
+    my_rank = ranked.filter(period_xp__gt=my_xp).count() + 1 if my_xp else None
 
     return Response({
         'period': period,
         'my_rank': my_rank,
-        'my_xp': my_xp,
-        'entries': LeaderboardEntrySerializer(entries, many=True).data,
+        'my_xp': my_xp or 0,
+        'entries': entries,
     })

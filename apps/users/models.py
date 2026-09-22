@@ -38,6 +38,21 @@ class User(AbstractUser):
 
     # ── Streak logic ─────────────────────────────────────────────────────────
 
+    @property
+    def live_streak(self) -> int:
+        """
+        The streak as of today. `current_streak` is only rewritten when the user
+        is next active, so it goes stale after a missed day — read this for display.
+        Mirrors record_activity(): the streak survives while activity today would
+        still extend it (active yesterday or today, or two days ago with a freeze).
+        """
+        if not self.current_streak or not self.last_active_date:
+            return 0
+        days_gap = (timezone.now().date() - self.last_active_date).days
+        if days_gap <= 1 or (days_gap == 2 and self.streak_freeze_available):
+            return self.current_streak
+        return 0
+
     def record_activity(self):
         """
         Call this whenever a user completes a meaningful engagement action.

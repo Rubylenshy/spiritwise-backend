@@ -19,7 +19,6 @@ console_command = '/code/manage.py shell'
 
 [processes]
   app = 'gunicorn --bind :8000 --workers 2 spiritwise.wsgi'
-  worker = 'celery -A spiritwise worker -B -l info --concurrency 2 --scheduler django_celery_beat.schedulers:DatabaseScheduler --without-gossip --without-mingle --without-heartbeat'
 
 [http_service]
   internal_port = 8000
@@ -40,7 +39,7 @@ console_command = '/code/manage.py shell'
   memory = '512mb'
   cpus = 1
   memory_mb = 512
-  processes = ['app', 'worker']
+  processes = ['app']
 
 [[statics]]
   guest_path = '/code/static'

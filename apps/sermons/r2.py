@@ -22,25 +22,50 @@ def get_r2_client():
     )
 
 
+AUDIO_KEY_PREFIX = 'sermons/'
+
+_CONTENT_TYPES = {
+    '.mp3':  'audio/mpeg',
+    '.m4a':  'audio/mp4',
+    '.aac':  'audio/aac',
+    '.ogg':  'audio/ogg',
+    '.opus': 'audio/ogg',
+    '.wav':  'audio/wav',
+    '.flac': 'audio/flac',
+}
+
+
+def _new_audio_key(original_filename: str) -> tuple:
+    """Return (key, content_type) for a fresh, collision-free audio object."""
+    ext = os.path.splitext(original_filename)[1].lower() or '.mp3'
+    return f'{AUDIO_KEY_PREFIX}{uuid.uuid4().hex}{ext}', _CONTENT_TYPES.get(ext, 'audio/mpeg')
+
+
+def presign_audio_upload(original_filename: str, expires_in: int = 3600) -> dict:
+    """
+    Presign a PUT so the browser can upload straight to R2, skipping the app server.
+    The client must send exactly `content_type` as its Content-Type header.
+    Returns { key, upload_url, content_type }
+    """
+    key, content_type = _new_audio_key(original_filename)
+    upload_url = get_r2_client().generate_presigned_url(
+        'put_object',
+        Params={
+            'Bucket': settings.AWS_STORAGE_BUCKET_NAME,
+            'Key': key,
+            'ContentType': content_type,
+        },
+        ExpiresIn=expires_in,
+    )
+    return {'key': key, 'upload_url': upload_url, 'content_type': content_type}
+
+
 def upload_audio(file_obj, original_filename: str, sermon_title: str = '') -> dict:
     """
     Upload an audio file to R2.
     Returns { key, public_url, size }
     """
-    ext = os.path.splitext(original_filename)[1].lower() or '.mp3'
-    unique_name = f'{uuid.uuid4().hex}{ext}'
-    key = f'sermons/{unique_name}'
-
-    content_type_map = {
-        '.mp3':  'audio/mpeg',
-        '.m4a':  'audio/mp4',
-        '.aac':  'audio/aac',
-        '.ogg':  'audio/ogg',
-        '.opus': 'audio/ogg',
-        '.wav':  'audio/wav',
-        '.flac': 'audio/flac',
-    }
-    content_type = content_type_map.get(ext, 'audio/mpeg')
+    key, content_type = _new_audio_key(original_filename)
 
     client = get_r2_client()
 

@@ -17,16 +17,8 @@ boto3==1.34.144
 django-storages==1.14.4
 Pillow==10.4.0
 
-# Task queue
-celery==5.4.0
+# Cache (Django RedisCache backend)
 redis==5.0.7
-django-celery-results==2.5.1
-django-celery-beat==2.6.0
-
-# Google API (Drive import)
-google-api-python-client==2.139.0
-google-auth-httplib2==0.2.0
-google-auth-oauthlib==1.2.1
 
 # Utilities
 python-slugify==8.0.4
