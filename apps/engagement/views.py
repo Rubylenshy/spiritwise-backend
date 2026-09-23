@@ -10,10 +10,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.sermons.models import ListenHistory
-from .models import StreakRecord, QuestionAnswer, ActivityType
+from apps.users.serializers import reward_payload
+from .models import StreakRecord, QuestionAnswer
 from .serializers import (
     EngagementStatsSerializer,
-    LogActivitySerializer,
     QuestionAnswerSerializer,
     StreakRecordSerializer,
 )
@@ -74,42 +74,6 @@ def stats(request):
     return Response(EngagementStatsSerializer(data).data)
 
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def log_activity(request):
-    """
-    POST /api/engagement/log/
-    Body: { activity_type, xp_earned?, date? }
-    Records a StreakRecord row and updates the user streak.
-    """
-    serializer = LogActivitySerializer(data=request.data)
-    if not serializer.is_valid():
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    user = request.user
-    date = serializer.validated_data.get('date') or timezone.now().date()
-    xp = serializer.validated_data['xp_earned']
-
-    StreakRecord.objects.update_or_create(
-        user=user,
-        date=date,
-        defaults={
-            'activity_type': serializer.validated_data['activity_type'],
-            'xp_earned': xp,
-        },
-    )
-
-    user.record_activity()
-
-    if xp:
-        user.award_xp(xp, reason=f'Activity: {serializer.validated_data["activity_type"]}')
-
-    return Response({
-        'current_streak': user.current_streak,
-        'xp_points': user.xp_points,
-    })
-
-
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def question_answers(request):
@@ -135,15 +99,17 @@ def question_answers(request):
         },
     )
 
+    user = request.user
     xp_awarded = 0
+    new_badges = []
     if created:
         xp_awarded = 10
-        request.user.award_xp(xp_awarded, reason='Reflection question answered')
-        request.user.record_activity()
+        new_badges += user.award_xp(xp_awarded, reason='Reflection question answered')
+        new_badges += user.record_activity('answered')
 
     return Response({
         **QuestionAnswerSerializer(answer).data,
-        'xp_awarded': xp_awarded,
+        **reward_payload(user, xp_awarded, new_badges),
     }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 

@@ -53,12 +53,15 @@ def login(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Allow login with email too
-    try:
-        user_obj = User.objects.get(email__iexact=username)
+    # Allow login with email too; usernames match case-insensitively so
+    # accounts created before usernames were lowercased still resolve.
+    user_obj = (
+        User.objects.filter(email__iexact=username).first()
+        or User.objects.filter(username=username).first()
+        or User.objects.filter(username__iexact=username).first()
+    )
+    if user_obj:
         username = user_obj.username
-    except User.DoesNotExist:
-        pass
 
     from django.contrib.auth import authenticate
     user = authenticate(request, username=username, password=password)

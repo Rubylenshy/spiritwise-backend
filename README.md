@@ -96,7 +96,6 @@ API is now live at **http://localhost:8000/api/**
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | GET | `/engagement/stats/` | Bearer | Streak, XP, daily goal |
-| POST | `/engagement/log/` | Bearer | Log an activity |
 | GET | `/engagement/answers/` | Bearer | User's reflection answers |
 | POST | `/engagement/answers/` | Bearer | Submit an answer (+10 XP) |
 | GET | `/engagement/leaderboard/?period=weekly` | Bearer | Top 50 + your rank |

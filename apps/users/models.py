@@ -53,16 +53,22 @@ class User(AbstractUser):
             return self.current_streak
         return 0
 
-    def record_activity(self):
+    def record_activity(self, activity_type: str = 'completed') -> list:
         """
         Call this whenever a user completes a meaningful engagement action.
-        Increments the streak if they're active on consecutive days.
-        Awards a streak freeze at every 7-day milestone.
+        Logs today's StreakRecord (the weekly heat-map), increments the streak
+        if they're active on consecutive days, awards a streak freeze at every
+        7-day milestone, and returns any streak badges newly earned.
         """
+        from apps.engagement.models import StreakRecord
+
         today = timezone.now().date()
+        StreakRecord.objects.get_or_create(
+            user=self, date=today, defaults={'activity_type': activity_type},
+        )
 
         if self.last_active_date == today:
-            return  # Already recorded today
+            return []  # Already recorded today
 
         days_gap = (today - self.last_active_date).days if self.last_active_date else None
 
@@ -89,38 +95,33 @@ class User(AbstractUser):
             'current_streak', 'longest_streak', 'last_active_date',
             'streak_freeze_available', 'streak_freeze_earned_at',
         ])
+        return self.award_badges('streak', self.current_streak)
 
-    def award_xp(self, points: int, reason: str = ''):
+    def award_xp(self, points: int, reason: str = '') -> list:
+        """Add XP, write the ledger entry, and return any XP badges newly earned."""
         self.xp_points += points
         self.save(update_fields=['xp_points'])
         XPTransaction.objects.create(user=self, points=points, reason=reason)
-        self._check_xp_badges()
+        return self.award_badges('xp', self.xp_points)
 
-    def _check_xp_badges(self):
-        """Award any XP-threshold badges the user has newly crossed."""
+    def award_badges(self, trigger: str, value: int) -> list:
+        """
+        Award every `trigger` badge whose threshold `value` has reached and the
+        user doesn't hold yet. Returns the newly earned Badge objects so the
+        caller can announce them. Never raises — a badge failure must not
+        block the XP/progress write that triggered it.
+        """
         try:
-            thresholds = Badge.objects.filter(trigger='xp', threshold__lte=self.xp_points)
-            already_earned = UserBadge.objects.filter(
-                user=self, badge__trigger='xp'
-            ).values_list('badge_id', flat=True)
-            for badge in thresholds:
-                if badge.id not in already_earned:
-                    UserBadge.objects.create(user=self, badge=badge)
+            earned = UserBadge.objects.filter(user=self).values_list('badge_id', flat=True)
+            new = list(
+                Badge.objects.filter(trigger=trigger, threshold__lte=value).exclude(id__in=earned)
+            )
+            UserBadge.objects.bulk_create(
+                [UserBadge(user=self, badge=b) for b in new], ignore_conflicts=True,
+            )
+            return new
         except Exception:
-            pass  # Never block XP award due to badge errors
-
-    def check_streak_badges(self):
-        """Call after record_activity() to award streak milestones."""
-        try:
-            thresholds = Badge.objects.filter(trigger='streak', threshold__lte=self.current_streak)
-            already_earned = UserBadge.objects.filter(
-                user=self, badge__trigger='streak'
-            ).values_list('badge_id', flat=True)
-            for badge in thresholds:
-                if badge.id not in already_earned:
-                    UserBadge.objects.create(user=self, badge=badge)
-        except Exception:
-            pass
+            return []
 
 
 class XPTransaction(models.Model):
