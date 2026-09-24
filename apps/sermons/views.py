@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
+from apps.users.serializers import reward_payload
 from .models import Sermon, Series, Tag, ListenHistory
 from .serializers import (
     SermonListSerializer,
@@ -13,6 +14,10 @@ from .serializers import (
     TagSerializer,
     ProgressUpdateSerializer,
 )
+
+# Fraction of a sermon that must be played for it to count as completed.
+# Keep in sync with COMPLETION_THRESHOLD in the frontend's AudioContext.jsx.
+COMPLETION_THRESHOLD = 0.9
 
 
 class SermonPagination(PageNumberPagination):
@@ -91,6 +96,10 @@ def update_progress(request, pk):
     POST /api/sermons/<pk>/progress/
     Body: { progress_seconds, completed }
     Awards XP on first completion.
+
+    A sermon counts as completed once 90% of it has been played. Completion
+    is sticky: later syncs (e.g. re-listening from the start) never clear it,
+    so the 50 XP is paid once per user per sermon.
     """
     try:
         sermon = Sermon.objects.get(pk=pk, is_published=True)
@@ -105,22 +114,34 @@ def update_progress(request, pk):
         user=request.user, sermon=sermon
     )
 
+    progress_seconds = serializer.validated_data['progress_seconds']
+    reached_threshold = (
+        not sermon.duration_seconds
+        or progress_seconds >= sermon.duration_seconds * COMPLETION_THRESHOLD
+    )
+
     was_completed = history.completed
-    history.progress_seconds = serializer.validated_data['progress_seconds']
-    history.completed = serializer.validated_data['completed']
+    history.progress_seconds = progress_seconds
+    history.completed = was_completed or (
+        serializer.validated_data['completed'] and reached_threshold
+    )
     history.save()
 
     # Award XP only on first completion
+    user = request.user
     xp_awarded = 0
+    new_badges = []
     if history.completed and not was_completed:
         xp_awarded = 50
-        request.user.award_xp(xp_awarded, reason=f'Completed sermon: {sermon.title}')
-        request.user.record_activity()
+        new_badges += user.award_xp(xp_awarded, reason=f'Completed sermon: {sermon.title}')
+        new_badges += user.record_activity('completed')
+        completed_count = ListenHistory.objects.filter(user=user, completed=True).count()
+        new_badges += user.award_badges('sermons', completed_count)
 
     return Response({
         'progress_seconds': history.progress_seconds,
         'completed': history.completed,
-        'xp_awarded': xp_awarded,
+        **reward_payload(user, xp_awarded, new_badges),
     })
 
 

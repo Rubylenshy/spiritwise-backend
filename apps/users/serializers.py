@@ -50,6 +50,13 @@ class RegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
         return attrs
 
+    def validate_username(self, value):
+        # Usernames are case-insensitive — store them lowercased
+        value = value.strip().lower()
+        if User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError('A user with that username already exists.')
+        return value
+
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError('A user with this email already exists.')
@@ -108,3 +115,18 @@ class UserBadgeSerializer(serializers.ModelSerializer):
         from apps.users.models import UserBadge
         model = UserBadge
         fields = ['id', 'badge', 'earned_at']
+
+
+def reward_payload(user, xp_awarded: int, new_badges) -> dict:
+    """
+    Fields every XP-awarding endpoint returns, so the client can update the
+    balance and announce badges the moment they're earned.
+    """
+    return {
+        'xp_awarded': xp_awarded,
+        'xp_points': user.xp_points,
+        'new_badges': [
+            {'name': b.name, 'icon': b.icon, 'description': b.description}
+            for b in new_badges
+        ],
+    }

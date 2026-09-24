@@ -22,12 +22,6 @@ class EngagementStatsSerializer(serializers.Serializer):
     recent_badges = serializers.ListField(child=serializers.DictField())
 
 
-class LogActivitySerializer(serializers.Serializer):
-    activity_type = serializers.ChoiceField(choices=['listened', 'completed', 'answered', 'login'])
-    xp_earned = serializers.IntegerField(min_value=0, default=0)
-    date = serializers.DateField(required=False)
-
-
 class QuestionAnswerSerializer(serializers.ModelSerializer):
     question_text = serializers.CharField(source='question.text', read_only=True)
     sermon_title = serializers.CharField(source='sermon.title', read_only=True)
