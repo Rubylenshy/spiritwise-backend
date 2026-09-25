@@ -12,6 +12,7 @@ urlpatterns = [
     # Core features
     path('api/sermons/', include('apps.sermons.urls')),
     path('api/engagement/', include('apps.engagement.urls')),
+    path('api/library/', include('apps.library.urls')),
     path('api/imports/', include('apps.imports.urls')),
 
     # WordLookUp — WL2

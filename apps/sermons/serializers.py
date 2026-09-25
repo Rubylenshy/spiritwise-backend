@@ -9,11 +9,16 @@ class TagSerializer(serializers.ModelSerializer):
 
 
 class SeriesSerializer(serializers.ModelSerializer):
-    sermon_count = serializers.IntegerField(source='sermons.count', read_only=True)
+    sermon_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Series
         fields = ['id', 'title', 'slug', 'description', 'cover_image', 'sermon_count', 'created_at']
+
+    def get_sermon_count(self, obj):
+        # series_list annotates this; elsewhere count published sermons directly
+        count = getattr(obj, 'published_count', None)
+        return count if count is not None else obj.sermons.filter(is_published=True).count()
 
 
 class SermonQuestionSerializer(serializers.ModelSerializer):
@@ -22,7 +27,15 @@ class SermonQuestionSerializer(serializers.ModelSerializer):
         fields = ['id', 'text', 'order']
 
 
-class SermonListSerializer(serializers.ModelSerializer):
+class FavoritedMixin(serializers.Serializer):
+    """is_favorited comes from apps.library.models.with_favorited() on the queryset."""
+    is_favorited = serializers.SerializerMethodField()
+
+    def get_is_favorited(self, obj):
+        return bool(getattr(obj, 'is_favorited', False))
+
+
+class SermonListSerializer(FavoritedMixin, serializers.ModelSerializer):
     """Lightweight — used in library listings."""
     tags = TagSerializer(many=True, read_only=True)
     series_title = serializers.CharField(source='series.title', read_only=True)
@@ -31,12 +44,12 @@ class SermonListSerializer(serializers.ModelSerializer):
         model = Sermon
         fields = [
             'id', 'title', 'slug', 'speaker', 'series_title',
-            'tags', 'duration_display', 'sermon_date', 'thumbnail',
-            'play_count', 'scripture_reference',
+            'tags', 'duration_seconds', 'duration_display', 'sermon_date', 'thumbnail',
+            'play_count', 'scripture_reference', 'is_favorited',
         ]
 
 
-class SermonDetailSerializer(serializers.ModelSerializer):
+class SermonDetailSerializer(FavoritedMixin, serializers.ModelSerializer):
     """Full detail — used in the player page."""
     tags = TagSerializer(many=True, read_only=True)
     series = SeriesSerializer(read_only=True)
@@ -51,7 +64,7 @@ class SermonDetailSerializer(serializers.ModelSerializer):
             'id', 'title', 'slug', 'speaker', 'series', 'tags',
             'description', 'audio_signed_url', 'duration_seconds', 'duration_display',
             'scripture_reference', 'sermon_date', 'thumbnail',
-            'play_count', 'questions', 'user_progress', 'next_sermon',
+            'play_count', 'questions', 'user_progress', 'next_sermon', 'is_favorited',
         ]
 
     def get_audio_signed_url(self, obj):
@@ -111,6 +124,7 @@ class SermonDetailSerializer(serializers.ModelSerializer):
             'id': next_s.id,
             'title': next_s.title,
             'speaker': next_s.speaker,
+            'duration_seconds': next_s.duration_seconds,
             'duration_display': next_s.duration_display,
             'thumbnail': request.build_absolute_uri(next_s.thumbnail.url)
                 if next_s.thumbnail and request else None,

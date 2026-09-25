@@ -1,10 +1,11 @@
 from django.contrib.auth import get_user_model
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 from .serializers import (
     RegisterSerializer,
@@ -18,6 +19,7 @@ User = get_user_model()
 
 
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def register(request):
     """
@@ -30,18 +32,16 @@ def register(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     user = serializer.save()
-    return Response(
-        AuthResponseSerializer.from_user(user),
-        status=status.HTTP_201_CREATED,
-    )
+    return Response(AuthResponseSerializer.from_user(user), status=status.HTTP_201_CREATED)
 
 
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def login(request):
     """
     POST /api/auth/login/
-    Body: { username, password }
+    Body: { username, password } — username may also be the email.
     Returns: { access, refresh, user }
     """
     username = request.data.get('username', '').strip()
@@ -179,28 +179,43 @@ def change_password(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def token_refresh(request):
+    """
+    POST /api/auth/token/refresh/
+    Body: { refresh }
+    Returns { access, refresh } — the refresh token rotates and the old one
+    is blacklisted, so clients must keep the new one.
+    """
+    serializer = TokenRefreshSerializer(data={'refresh': request.data.get('refresh', '')})
+    try:
+        serializer.is_valid(raise_exception=True)
+    except (TokenError, InvalidToken):
+        return Response(
+            {'detail': 'Session expired. Please log in again.'},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+    return Response(serializer.validated_data)
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def logout(request):
     """
     POST /api/auth/logout/
     Body: { refresh }
-    Blacklists the refresh token.
+    Blacklists the refresh token. AllowAny so it still works after the access
+    token has expired; always succeeds.
     """
-    refresh_token = request.data.get('refresh')
-    if not refresh_token:
-        return Response(
-            {'detail': 'Refresh token is required.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    try:
-        token = RefreshToken(refresh_token)
-        token.blacklist()
-    except TokenError:
-        return Response(
-            {'detail': 'Invalid or expired token.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    return Response({'detail': 'Successfully logged out.'}, status=status.HTTP_205_RESET_CONTENT)
+    refresh = request.data.get('refresh')
+    if refresh:
+        try:
+            RefreshToken(refresh).blacklist()
+        except TokenError:
+            pass  # Already expired or blacklisted — nothing left to revoke
+    return Response({'detail': 'Successfully logged out.'})
 
 
 @api_view(['GET'])

@@ -28,8 +28,25 @@ class Series(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            self.slug = slugify(self.title)
+            base_slug = slugify(self.title) or 'series'
+            slug = base_slug
+            counter = 1
+            while Series.objects.filter(slug=slug).exclude(pk=self.pk).exists():
+                slug = f'{base_slug}-{counter}'
+                counter += 1
+            self.slug = slug
         super().save(*args, **kwargs)
+
+    @classmethod
+    def resolve(cls, title):
+        """
+        Existing series with this title (case-insensitive), else a new one.
+        Imports use this for typed series names and audio album tags alike.
+        """
+        title = ' '.join((title or '').split())[:200]
+        if not title:
+            return None
+        return cls.objects.filter(title__iexact=title).first() or cls.objects.create(title=title)
 
     def __str__(self):
         return self.title

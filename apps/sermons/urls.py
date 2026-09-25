@@ -12,5 +12,6 @@ urlpatterns = [
     path('series/', views.series_list, name='series-list'),
     path('series/<int:pk>/', views.series_detail, name='series-detail'),
 
+    path('speakers/', views.speaker_list, name='speaker-list'),
     path('tags/', views.tag_list, name='tag-list'),
 ]

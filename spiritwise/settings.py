@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.sermons',
     'apps.engagement',
+    'apps.library',
     'apps.imports',
     'apps.wordlookup',
 ]

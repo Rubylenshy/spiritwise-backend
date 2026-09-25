@@ -39,6 +39,19 @@ def _is_admin(user):
     return user.is_staff or user.is_superuser
 
 
+def _resolve_series(data, album=''):
+    """
+    Series for an imported sermon. An explicit choice wins — an existing
+    series id (sermon_series) or a typed name (sermon_series_title, found
+    case-insensitively or created) — then the audio file's album tag.
+    """
+    try:
+        series = Series.objects.filter(pk=int(data.get('sermon_series') or 0)).first()
+    except (TypeError, ValueError):
+        series = None
+    return series or Series.resolve(str(data.get('sermon_series_title', ''))) or Series.resolve(album)
+
+
 def _upload_cover_art(image_bytes: bytes, mime: str) -> str:
     """Upload cover art bytes to R2 and return the public URL."""
     ext_map = {
@@ -106,7 +119,7 @@ def upload_sermon(request):
 
     Extracts duration + album art from the file automatically.
     Form fields: audio_file, sermon_title, sermon_speaker,
-                 sermon_series, sermon_date, sermon_tags,
+                 sermon_series | sermon_series_title, sermon_date, sermon_tags,
                  description, scripture_ref
     """
     if not _is_admin(request.user):
@@ -156,13 +169,7 @@ def upload_sermon(request):
                 pass  # Album art upload failure is non-fatal
 
         # ── Step 4: Resolve series ────────────────────────────────────────────
-        series = None
-        series_id = request.data.get('sermon_series')
-        if series_id:
-            try:
-                series = Series.objects.get(pk=series_id)
-            except Series.DoesNotExist:
-                pass
+        series = _resolve_series(request.data, meta['album'])
 
         # ── Step 5: Create sermon record ──────────────────────────────────────
         # Duration: use extracted value, fall back to 0
@@ -269,12 +276,13 @@ def finalize_upload(request):
     """
     POST /api/imports/finalize/
     JSON: r2_key (from /imports/presign/), sermon_title, sermon_speaker,
-          sermon_series, sermon_date, sermon_tags, description, scripture_ref
+          sermon_series | sermon_series_title, sermon_date, sermon_tags,
+          description, scripture_ref
 
     Reads duration/tags/cover art from the object already in R2 (ranged reads)
     and creates the Sermon. Submitted fields win; blank speaker/date/description
-    fall back to the file's embedded tags. Safe to retry — a key that already
-    has a sermon returns that sermon.
+    fall back to the file's embedded tags, and a blank series to its album tag.
+    Safe to retry — a key that already has a sermon returns that sermon.
     """
     if not _is_admin(request.user):
         return Response({'detail': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
@@ -310,11 +318,6 @@ def finalize_upload(request):
     try:
         meta = _probe_r2_audio(r2_key)
 
-        series = None
-        series_id = request.data.get('sermon_series')
-        if series_id:
-            series = Series.objects.filter(pk=series_id).first()
-
         if not sermon_date and meta['date']:
             sermon_date = parse_date(meta['date'][:10])  # None for year-only tags
 
@@ -322,7 +325,7 @@ def finalize_upload(request):
             sermon = Sermon.objects.create(
                 title=title,
                 speaker=speaker or meta['artist'],
-                series=series,
+                series=_resolve_series(request.data, meta['album']),
                 description=str(request.data.get('description', '')).strip() or meta['comment'],
                 scripture_reference=str(request.data.get('scripture_ref', '')).strip(),
                 sermon_date=sermon_date,
@@ -479,8 +482,7 @@ def _apply_csv_row(row):
             raise ValueError(f"is_published '{row['is_published']}' must be true/false.")
 
     if row.get('series'):
-        series, _ = Series.objects.get_or_create(title=row['series'])
-        sermon.series = series
+        sermon.series = Series.resolve(row['series'])
 
     if meta is not None:
         sermon.r2_key = r2_key
@@ -490,6 +492,7 @@ def _apply_csv_row(row):
         # CSV values win; embedded tags only fill what's still blank.
         sermon.speaker = sermon.speaker or meta['artist']
         sermon.description = sermon.description or meta['comment']
+        sermon.series = sermon.series or Series.resolve(meta['album'])
         if not sermon.sermon_date and meta['date']:
             sermon.sermon_date = parse_date(meta['date'][:10])  # None for year-only tags
 
@@ -525,7 +528,8 @@ def bulk_import_csv(request):
                           blank speaker/date/description are read from the file's tags.
       title             — required when creating a new sermon (unless r2_key is given)
       speaker, description, scripture_reference, audio_url
-      series            — series title, get-or-create
+      series            — series title, matched case-insensitively or created; when
+                          blank, a sermon without a series takes the file's album tag
       tags              — comma-separated tag names, replaces existing tags
       sermon_date       — YYYY-MM-DD
       is_published      — true/false
