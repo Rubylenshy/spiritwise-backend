@@ -1,10 +1,12 @@
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 from .serializers import (
     RegisterSerializer,
@@ -17,32 +19,57 @@ from .serializers import (
 User = get_user_model()
 
 
+# ── Refresh-token cookie ──────────────────────────────────────────────────────
+
+def _set_refresh_cookie(response, refresh):
+    cookie = settings.REFRESH_COOKIE
+    response.set_cookie(
+        cookie['key'], refresh,
+        max_age=int(settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
+        path=cookie['path'], httponly=cookie['httponly'],
+        secure=cookie['secure'], samesite=cookie['samesite'],
+    )
+    return response
+
+
+def _clear_refresh_cookie(response):
+    cookie = settings.REFRESH_COOKIE
+    response.delete_cookie(cookie['key'], path=cookie['path'], samesite=cookie['samesite'])
+    return response
+
+
+def _auth_response(user, http_status=status.HTTP_200_OK):
+    """{ access, user } in the body; the refresh token only as a cookie."""
+    data = AuthResponseSerializer.from_user(user)
+    refresh = data.pop('refresh')
+    return _set_refresh_cookie(Response(data, status=http_status), refresh)
+
+
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def register(request):
     """
     POST /api/auth/register/
     Body: { username, email, password, confirm_password, first_name?, last_name? }
-    Returns: { access, refresh, user }
+    Returns: { access, user } and sets the refresh cookie.
     """
     serializer = RegisterSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     user = serializer.save()
-    return Response(
-        AuthResponseSerializer.from_user(user),
-        status=status.HTTP_201_CREATED,
-    )
+    return _auth_response(user, status.HTTP_201_CREATED)
 
 
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def login(request):
     """
     POST /api/auth/login/
-    Body: { username, password }
-    Returns: { access, refresh, user }
+    Body: { username, password } — username may also be the email.
+    Returns: { access, user } and sets the refresh cookie.
     """
     username = request.data.get('username', '').strip()
     password = request.data.get('password', '')
@@ -81,7 +108,7 @@ def login(request):
     # Record activity for streak tracking
     user.record_activity()
 
-    return Response(AuthResponseSerializer.from_user(user))
+    return _auth_response(user)
 
 
 @api_view(['GET'])
@@ -179,28 +206,51 @@ def change_password(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def token_refresh(request):
+    """
+    POST /api/auth/token/refresh/
+    Reads the refresh cookie, rotates it and returns { access }.
+    """
+    refresh = request.COOKIES.get(settings.REFRESH_COOKIE['key'])
+    if not refresh:
+        return Response({'detail': 'No refresh token.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    serializer = TokenRefreshSerializer(data={'refresh': refresh})
+    try:
+        serializer.is_valid(raise_exception=True)
+    except (TokenError, InvalidToken):
+        return _clear_refresh_cookie(Response(
+            {'detail': 'Session expired. Please log in again.'},
+            status=status.HTTP_401_UNAUTHORIZED,
+        ))
+
+    data = serializer.validated_data
+    response = Response({'access': data['access']})
+    if 'refresh' in data:  # ROTATE_REFRESH_TOKENS
+        _set_refresh_cookie(response, data['refresh'])
+    return response
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def logout(request):
     """
     POST /api/auth/logout/
-    Body: { refresh }
-    Blacklists the refresh token.
+    Blacklists the refresh cookie and clears it. AllowAny so it still works
+    after the access token has expired; always succeeds.
     """
-    refresh_token = request.data.get('refresh')
-    if not refresh_token:
-        return Response(
-            {'detail': 'Refresh token is required.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    try:
-        token = RefreshToken(refresh_token)
-        token.blacklist()
-    except TokenError:
-        return Response(
-            {'detail': 'Invalid or expired token.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    return Response({'detail': 'Successfully logged out.'}, status=status.HTTP_205_RESET_CONTENT)
+    refresh = request.COOKIES.get(settings.REFRESH_COOKIE['key'])
+    if refresh:
+        try:
+            RefreshToken(refresh).blacklist()
+        except TokenError:
+            pass  # Already expired or blacklisted — nothing left to revoke
+    return _clear_refresh_cookie(
+        Response({'detail': 'Successfully logged out.'}, status=status.HTTP_200_OK)
+    )
 
 
 @api_view(['GET'])

@@ -36,12 +36,13 @@ Never add a `Co-Authored-By: Claude …` trailer or any other Claude/AI attribut
 
 ## Architecture
 
-Four-app split under `apps/`, each owning its own `models.py` / `serializers.py` / `views.py` / `urls.py`, mounted in [spiritwise/urls.py](spiritwise/urls.py) under `/api/<app>/`:
+Five-app split under `apps/`, each owning its own `models.py` / `serializers.py` / `views.py` / `urls.py`, mounted in [spiritwise/urls.py](spiritwise/urls.py) under `/api/<app>/`:
 
-- **users** — custom `User` model (`AUTH_USER_MODEL = 'users.User'`), JWT register/login/logout/refresh, `XPTransaction`.
+- **users** — custom `User` model (`AUTH_USER_MODEL = 'users.User'`), JWT register/login/logout/refresh, `XPTransaction`. Login accepts a username or an email. The refresh token is **never** in a response body: login/register/refresh set it as an httpOnly `SameSite=Strict` cookie scoped to `/api/auth/` (`REFRESH_COOKIE` in settings) and return only `{ access, user }`; `token/refresh/` reads the cookie and rotates it; `logout/` blacklists and clears it. These four views use `@authentication_classes([])` so a stale bearer header can't 401 them. This relies on the frontend being same-origin with `/api` (Vite proxy in dev, a Vercel rewrite in prod).
 - **sermons** — `Sermon`, `Series`, `Tag`, `SermonQuestion`, `ListenHistory`. Audio is served through a signed-URL indirection, not directly: `SermonDetailSerializer.get_audio_signed_url()` ([apps/sermons/serializers.py](apps/sermons/serializers.py)) calls `apps/sermons/stream_token.py` to mint a short-lived token, and the client fetches `/api/sermons/<id>/stream/?token=...` rather than the R2 URL directly. Falls back to the raw `audio_url`/`audio_file.url` if token generation fails.
+- **library** — per-user `Favorite` and `Playlist`/`PlaylistItem` (private, ordered by a sparse `position`, no duplicates), under `/api/library/`. Sermon list/detail responses carry `is_favorited` via `with_favorited()` in [apps/library/models.py](apps/library/models.py) — annotate any new sermon queryset with it.
 - **engagement** — streaks, XP, reflection answers, leaderboard. The leaderboard is computed live per request (weekly/monthly sum `XPTransaction`, all-time uses `User.xp_points`). `User.current_streak` is only rewritten on the user's next activity, so display code must read `User.live_streak`, which reports 0 for a lapsed streak.
-- **imports** — admin-only uploads. Browser uploads go `POST /imports/presign/` → browser PUTs straight to R2 → `POST /imports/finalize/` (probes tags/duration/cover via ranged reads, creates the `Sermon`). R2 bucket CORS must allow the frontend origins for the PUT — `python manage.py setup_r2_cors`. Also `bulk-csv/` for metadata, and a legacy synchronous `upload/`. `CloudImportJob` is the audit record.
+- **imports** — admin-only uploads. Browser uploads go `POST /imports/presign/` → browser PUTs straight to R2 → `POST /imports/finalize/` (probes tags/duration/cover via ranged reads, creates the `Sermon`). R2 bucket CORS must allow the frontend origins for the PUT — `python manage.py setup_r2_cors`. Also `bulk-csv/` for metadata, and a legacy synchronous `upload/`. `CloudImportJob` is the audit record. Series on import: an explicit `sermon_series` id or `sermon_series_title` wins, else the file's album tag — both go through `Series.resolve()` (case-insensitive get-or-create).
 - **wordlookup** ("WordLookUp" feature, in-progress — see WL1–WL4 markers below) — Bible reference/phrase lookup, history, saved verses, Whisper transcription fallback.
 
 ### WordLookUp lookup pipeline (apps/wordlookup/views.py)
@@ -52,6 +53,10 @@ Four-app split under `apps/`, each owning its own `models.py` / `serializers.py`
 3. If the local map misses, falls through to `_ai_resolve_and_fetch`, which dynamically imports `apps/wordlookup/ai_resolver.py` (Claude-based) — **this module does not exist yet**; the import is wrapped in try/except so the endpoint degrades to an empty result set rather than erroring. The design intent (per the docstring) is that Claude only ever returns *references*, never verse text, so actual scripture always comes from the Bible API — this prevents hallucinated scripture and should be preserved if/when `ai_resolver.py` is implemented.
 
 Feature progress is tracked inline via `WL1`/`WL2`/`WL3`/`WL4` comment tags in code and commit messages — check the tag on a block before assuming a feature is fully wired (e.g. `saved_verses`/`delete_saved_verse` views exist as WL4 stubs already routed in [urls.py](apps/wordlookup/urls.py) even though WL3 is the current milestone).
+
+### Row Level Security
+
+[spiritwise/rls.py](spiritwise/rls.py) enables RLS (no policies) on every `public` table after each `migrate`, which closes Supabase's auto-generated Data API. Django connects as the table owner and bypasses RLS, so don't add policies expecting them to restrict the app.
 
 ### Config
 

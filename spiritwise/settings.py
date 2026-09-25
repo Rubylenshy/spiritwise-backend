@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.sermons',
     'apps.engagement',
+    'apps.library',
     'apps.imports',
     'apps.wordlookup',
 ]
@@ -165,6 +166,10 @@ REST_FRAMEWORK = {
         'anon': '100/day',
         'user': '1000/day',
     },
+    # Production traffic reaches gunicorn via Vercel's /api rewrite and then
+    # Fly's proxy, each appending to X-Forwarded-For. Throttling keys on the
+    # entry this many hops from the end, i.e. the real client IP.
+    'NUM_PROXIES': config('NUM_PROXIES', default=2, cast=int),
 }
 
 # ─── Simple JWT ───────────────────────────────────────────────────────────────
@@ -178,6 +183,18 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
+}
+
+# The refresh token never reaches JavaScript: it lives in an httpOnly cookie
+# scoped to the auth endpoints. The frontend is served same-origin (Vite proxy
+# in dev, Vercel /api rewrite in prod), so SameSite=Strict is enough to stop
+# cross-site requests from refreshing or logging out.
+REFRESH_COOKIE = {
+    'key': 'spiritwise_refresh',
+    'path': '/api/auth/',
+    'httponly': True,
+    'secure': not DEBUG,
+    'samesite': 'Strict',
 }
 
 # ─── Cache ────────────────────────────────────────────────────────────────────
