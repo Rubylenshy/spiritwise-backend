@@ -90,7 +90,11 @@ def me(request):
     """
     GET /api/auth/me/
     Returns the currently authenticated user.
+
+    The app calls this on every load, so it also counts as the day's visit for
+    the streak — a session restored from a stored token never hits login.
     """
+    request.user.record_activity('login')
     return Response(UserPublicSerializer(request.user).data)
 
 

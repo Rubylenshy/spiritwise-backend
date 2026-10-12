@@ -99,8 +99,9 @@ class User(AbstractUser):
 
     def award_xp(self, points: int, reason: str = '') -> list:
         """Add XP, write the ledger entry, and return any XP badges newly earned."""
-        self.xp_points += points
-        self.save(update_fields=['xp_points'])
+        
+        type(self).objects.filter(pk=self.pk).update(xp_points=models.F('xp_points') + points)
+        self.refresh_from_db(fields=['xp_points'])
         XPTransaction.objects.create(user=self, points=points, reason=reason)
         return self.award_badges('xp', self.xp_points)
 

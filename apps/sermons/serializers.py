@@ -53,7 +53,7 @@ class SermonDetailSerializer(FavoritedMixin, serializers.ModelSerializer):
     """Full detail — used in the player page."""
     tags = TagSerializer(many=True, read_only=True)
     series = SeriesSerializer(read_only=True)
-    questions = SermonQuestionSerializer(many=True, read_only=True)
+    questions = serializers.SerializerMethodField()
     audio_signed_url = serializers.SerializerMethodField()
     user_progress = serializers.SerializerMethodField()
     next_sermon = serializers.SerializerMethodField()
@@ -92,6 +92,23 @@ class SermonDetailSerializer(FavoritedMixin, serializers.ModelSerializer):
             return request.build_absolute_uri(obj.audio_file.url)
 
         return None
+
+    def get_questions(self, obj):
+        """
+        Reflection questions, each with `my_answer`: the user's saved answer or
+        None. XP is paid only for a question's first answer, so the client
+        needs this to show which ones are already answered.
+        """
+        questions = SermonQuestionSerializer(obj.questions.all(), many=True).data
+        request = self.context.get('request')
+        answers = {}
+        if request and request.user.is_authenticated:
+            from apps.engagement.models import QuestionAnswer
+            answers = dict(
+                QuestionAnswer.objects.filter(user=request.user, question__sermon=obj)
+                .values_list('question_id', 'answer_text')
+            )
+        return [{**q, 'my_answer': answers.get(q['id'])} for q in questions]
 
     def get_user_progress(self, obj):
         request = self.context.get('request')
