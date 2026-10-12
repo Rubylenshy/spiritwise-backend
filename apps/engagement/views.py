@@ -41,7 +41,9 @@ def stats(request):
 
     sermons_completed = ListenHistory.objects.filter(user=user, completed=True).count()
 
-    last_7 = StreakRecord.objects.filter(user=user).order_by('-date')[:7]
+    # Active days within the last 7 calendar days (today included); the
+    # frontend lays them out day by day, leaving inactive days empty
+    last_7 = StreakRecord.objects.filter(user=user, date__gt=today - timedelta(days=7)).order_by('date')
 
     from apps.users.models import UserBadge
     recent_badges = list(

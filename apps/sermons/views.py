@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.db.models import Count, Q
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -113,11 +114,18 @@ def update_progress(request, pk):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    history, created = ListenHistory.objects.get_or_create(
-        user=request.user, sermon=sermon
-    )
+    with transaction.atomic():
+        return _save_progress(request, sermon, serializer.validated_data)
 
-    progress_seconds = serializer.validated_data['progress_seconds']
+
+def _save_progress(request, sermon, data):
+    # Locked so two syncs racing past the threshold (seeking to the end fires
+    # the threshold sync and the `ended` sync together) can't both see the
+    # sermon as not yet completed and both pay the XP.
+    ListenHistory.objects.get_or_create(user=request.user, sermon=sermon)
+    history = ListenHistory.objects.select_for_update().get(user=request.user, sermon=sermon)
+
+    progress_seconds = data['progress_seconds']
     reached_threshold = (
         not sermon.duration_seconds
         or progress_seconds >= sermon.duration_seconds * COMPLETION_THRESHOLD
@@ -126,7 +134,7 @@ def update_progress(request, pk):
     was_completed = history.completed
     history.progress_seconds = progress_seconds
     history.completed = was_completed or (
-        serializer.validated_data['completed'] and reached_threshold
+        data['completed'] and reached_threshold
     )
     history.save()
 
