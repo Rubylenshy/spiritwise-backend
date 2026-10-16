@@ -28,7 +28,13 @@ python manage.py test_ai_resolver     # smoke-tests the Claude phrase resolver
 python manage.py test_bible_apis      # smoke-tests scripture.api.bible / api.esv.org
 ```
 
-There is no pytest/unittest suite wired up — `apps/wordlookup/test_ai_resolver.py` and the `test_ai_resolver`/`test_bible_apis` management commands are manual smoke-test scripts run via `manage.py`, not `manage.py test`.
+Unit tests live in `apps/library/tests.py` and `apps/sermons/tests.py`. Run them against SQLite so the test runner never creates a database on the `.env` Supabase/Upstash URLs (environment variables override `.env`):
+
+```bash
+DATABASE_URL=sqlite:///test.sqlite3 REDIS_URL=redis://localhost:6379/0 USE_S3=False python manage.py test apps.library apps.sermons
+```
+
+`apps/wordlookup/test_ai_resolver.py` and the `test_ai_resolver`/`test_bible_apis` management commands are manual smoke-test scripts run via `manage.py`, not `manage.py test` — don't include `apps.wordlookup` in a test run.
 
 ## Git
 
@@ -40,7 +46,7 @@ Five-app split under `apps/`, each owning its own `models.py` / `serializers.py`
 
 - **users** — custom `User` model (`AUTH_USER_MODEL = 'users.User'`), JWT register/login/logout/refresh, `XPTransaction`. Login accepts a username or an email. Login/register return `{ access, refresh, user }`; `token/refresh/` takes `{ refresh }` and returns `{ access, refresh }` — refresh tokens rotate and the old one is blacklisted, so clients must store the new one. `logout/` blacklists the posted refresh token and works without a valid access token. These four views use `@authentication_classes([])` so a stale bearer header can't 401 them.
 - **sermons** — `Sermon`, `Series`, `Tag`, `SermonQuestion`, `ListenHistory`. Audio is served through a signed-URL indirection, not directly: `SermonDetailSerializer.get_audio_signed_url()` ([apps/sermons/serializers.py](apps/sermons/serializers.py)) calls `apps/sermons/stream_token.py` to mint a short-lived token, and the client fetches `/api/sermons/<id>/stream/?token=...` rather than the R2 URL directly. Falls back to the raw `audio_url`/`audio_file.url` if token generation fails.
-- **library** — per-user `Favorite` and `Playlist`/`PlaylistItem` (private, ordered by a sparse `position`, no duplicates), under `/api/library/`. Sermon list/detail responses carry `is_favorited` via `with_favorited()` in [apps/library/models.py](apps/library/models.py) — annotate any new sermon queryset with it.
+- **library** — per-user `Favorite` and `Playlist`/`PlaylistItem` (private, ordered by a sparse `position`, no duplicates), under `/api/library/`. Sermon list/detail responses carry `is_favorited` via `with_favorited()` in [apps/library/models.py](apps/library/models.py) — annotate any new sermon queryset with it. Playlist responses carry `cover_thumbnails` (up to 4 distinct absolute thumbnail URLs, in position order); the list endpoint prefetches them with `with_cover_items()` so it stays at a fixed query count — keep passing `context={'request': request}` to `PlaylistSerializer`.
 - **engagement** — streaks, XP, reflection answers, leaderboard. The leaderboard is computed live per request (weekly/monthly sum `XPTransaction`, all-time uses `User.xp_points`). `User.current_streak` is only rewritten on the user's next activity, so display code must read `User.live_streak`, which reports 0 for a lapsed streak.
 - **imports** — admin-only uploads. Browser uploads go `POST /imports/presign/` → browser PUTs straight to R2 → `POST /imports/finalize/` (probes tags/duration/cover via ranged reads, creates the `Sermon`). R2 bucket CORS must allow the frontend origins for the PUT — `python manage.py setup_r2_cors`. Also `bulk-csv/` for metadata, and a legacy synchronous `upload/`. `CloudImportJob` is the audit record. Series on import: an explicit `sermon_series` id or `sermon_series_title` wins, else the file's album tag — both go through `Series.resolve()` (case-insensitive get-or-create).
 - **wordlookup** ("WordLookUp" feature, in-progress — see WL1–WL4 markers below) — Bible reference/phrase lookup, history, saved verses, Whisper transcription fallback.
