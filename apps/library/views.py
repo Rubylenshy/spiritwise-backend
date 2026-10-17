@@ -12,7 +12,7 @@ from rest_framework.response import Response
 
 from apps.sermons.models import Sermon
 from apps.sermons.serializers import SermonListSerializer
-from .models import Favorite, Playlist, PlaylistItem
+from .models import Favorite, Playlist, PlaylistItem, with_cover_items
 from .serializers import PlaylistItemSerializer, PlaylistSerializer
 
 
@@ -89,15 +89,15 @@ def playlist_list(request):
          with a first sermon.
     """
     if request.method == 'GET':
-        qs = _user_playlists(request.user)
+        qs = with_cover_items(_user_playlists(request.user))
         sermon_id = request.query_params.get('sermon')
         if sermon_id and sermon_id.isdigit():
             qs = qs.annotate(has_sermon=Exists(
                 PlaylistItem.objects.filter(playlist=OuterRef('pk'), sermon_id=int(sermon_id))
             ))
-        return Response(PlaylistSerializer(qs, many=True).data)
+        return Response(PlaylistSerializer(qs, many=True, context={'request': request}).data)
 
-    serializer = PlaylistSerializer(data=request.data)
+    serializer = PlaylistSerializer(data=request.data, context={'request': request})
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -112,7 +112,7 @@ def playlist_list(request):
         if sermon:
             PlaylistItem.objects.create(playlist=playlist, sermon=sermon, position=1)
     return Response(
-        PlaylistSerializer(_get_playlist(request, playlist.pk)).data,
+        PlaylistSerializer(_get_playlist(request, playlist.pk), context={'request': request}).data,
         status=status.HTTP_201_CREATED,
     )
 
@@ -130,12 +130,14 @@ def playlist_detail(request, pk):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     if request.method == 'PATCH':
-        serializer = PlaylistSerializer(playlist, data=request.data, partial=True)
+        serializer = PlaylistSerializer(
+            playlist, data=request.data, partial=True, context={'request': request}
+        )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         serializer.save()
 
-    return Response(PlaylistSerializer(playlist).data)
+    return Response(PlaylistSerializer(playlist, context={'request': request}).data)
 
 
 @api_view(['GET', 'POST'])

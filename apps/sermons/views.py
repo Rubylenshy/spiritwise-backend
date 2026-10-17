@@ -171,7 +171,7 @@ def series_list(request):
     )
     if request.query_params.get('all') != '1':
         qs = qs.filter(published_count__gt=0)
-    serializer = SeriesSerializer(qs, many=True)
+    serializer = SeriesSerializer(qs, many=True, context={'request': request})
     return Response(serializer.data)
 
 
@@ -186,7 +186,7 @@ def series_detail(request, pk):
         s = Series.objects.get(pk=pk)
     except Series.DoesNotExist:
         return Response({'detail': 'Series not found.'}, status=status.HTTP_404_NOT_FOUND)
-    return Response(SeriesSerializer(s).data)
+    return Response(SeriesSerializer(s, context={'request': request}).data)
 
 
 # ── Speakers ──────────────────────────────────────────────────────────────────

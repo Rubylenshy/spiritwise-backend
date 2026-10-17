@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.db import models
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Prefetch
 
 from apps.sermons.models import Sermon
 
@@ -52,6 +52,31 @@ class PlaylistItem(models.Model):
 
     def __str__(self):
         return f'{self.playlist.name} #{self.position}: {self.sermon.title}'
+
+
+COVER_THUMBNAILS = 4
+# Items scanned per playlist for covers — headroom for sermons sharing a thumbnail.
+COVER_SCAN = 12
+
+
+def cover_items():
+    """A playlist's published items that have a thumbnail, in position order."""
+    return (
+        PlaylistItem.objects
+        .filter(sermon__is_published=True)
+        .exclude(sermon__thumbnail='')
+        .exclude(sermon__thumbnail__isnull=True)
+        .select_related('sermon')
+        .only('playlist_id', 'position', 'sermon__thumbnail')
+        .order_by('position')
+    )
+
+
+def with_cover_items(queryset):
+    """Prefetch each playlist's first cover_items() as .cover_items, in one extra query."""
+    return queryset.prefetch_related(
+        Prefetch('items', queryset=cover_items()[:COVER_SCAN], to_attr='cover_items')
+    )
 
 
 def with_favorited(queryset, user):
