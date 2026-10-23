@@ -9,6 +9,7 @@ urlpatterns = [
     # Registration & login
     path('register/', views.register, name='auth-register'),
     path('login/', views.login, name='auth-login'),
+    path('google/', views.google_login, name='auth-google'),
     path('logout/', views.logout, name='auth-logout'),
 
     # JWT token management

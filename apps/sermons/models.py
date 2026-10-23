@@ -2,14 +2,17 @@ from django.db import models
 from django.conf import settings
 from django.utils.text import slugify
 
+# Slug bases are cut short of the 255-char column so a '-<n>' suffix still fits.
+SLUG_BASE_LENGTH = 240
+
 
 class Tag(models.Model):
-    name = models.CharField(max_length=50, unique=True)
-    slug = models.SlugField(unique=True, blank=True)
+    name = models.CharField(max_length=255, unique=True)
+    slug = models.SlugField(max_length=255, unique=True, blank=True)
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            self.slug = slugify(self.name)
+            self.slug = slugify(self.name)[:255]
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -20,15 +23,15 @@ class Tag(models.Model):
 
 
 class Series(models.Model):
-    title = models.CharField(max_length=200)
-    slug = models.SlugField(unique=True, blank=True)
+    title = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=255, unique=True, blank=True)
     description = models.TextField(blank=True)
     cover_image = models.ImageField(upload_to='series/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            base_slug = slugify(self.title) or 'series'
+            base_slug = slugify(self.title)[:SLUG_BASE_LENGTH] or 'series'
             slug = base_slug
             counter = 1
             while Series.objects.filter(slug=slug).exclude(pk=self.pk).exists():
@@ -43,7 +46,7 @@ class Series(models.Model):
         Existing series with this title (case-insensitive), else a new one.
         Imports use this for typed series names and audio album tags alike.
         """
-        title = ' '.join((title or '').split())[:200]
+        title = ' '.join((title or '').split())[:255]
         if not title:
             return None
         return cls.objects.filter(title__iexact=title).first() or cls.objects.create(title=title)
@@ -58,8 +61,8 @@ class Series(models.Model):
 
 class Sermon(models.Model):
     title = models.CharField(max_length=300)
-    slug = models.SlugField(unique=True, blank=True)
-    speaker = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=255, unique=True, blank=True)
+    speaker = models.CharField(max_length=255)
     series = models.ForeignKey(
         Series, on_delete=models.SET_NULL, null=True, blank=True, related_name='sermons'
     )
@@ -92,7 +95,7 @@ class Sermon(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            base_slug = slugify(self.title)
+            base_slug = slugify(self.title)[:SLUG_BASE_LENGTH]
             slug = base_slug
             counter = 1
             while Sermon.objects.filter(slug=slug).exclude(pk=self.pk).exists():

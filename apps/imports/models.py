@@ -42,7 +42,7 @@ class CloudImportJob(models.Model):
 
     # Sermon metadata (pre-filled by user before import)
     sermon_title = models.CharField(max_length=300, blank=True)
-    sermon_speaker = models.CharField(max_length=200, blank=True)
+    sermon_speaker = models.CharField(max_length=255, blank=True)
     sermon_series_id = models.IntegerField(null=True, blank=True)
     sermon_date = models.DateField(null=True, blank=True)
     sermon_tags = models.CharField(max_length=500, blank=True)  # comma-separated tag names

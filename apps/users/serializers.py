@@ -75,12 +75,12 @@ class AuthResponseSerializer(serializers.Serializer):
     user = UserPublicSerializer()
 
     @staticmethod
-    def from_user(user) -> dict:
+    def from_user(user, request=None) -> dict:
         refresh = RefreshToken.for_user(user)
         return {
             'access': str(refresh.access_token),
             'refresh': str(refresh),
-            'user': UserPublicSerializer(user).data,
+            'user': UserPublicSerializer(user, context={'request': request}).data,
         }
 
 
@@ -88,6 +88,15 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['first_name', 'last_name', 'avatar', 'daily_goal_minutes', 'email_reminders']
+
+    def update(self, instance, validated_data):
+        # Save only the edited columns: a full save would write back this
+        # request's copy of xp_points/streak and undo any award made meanwhile.
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        if validated_data:
+            instance.save(update_fields=list(validated_data))
+        return instance
 
 
 class ChangePasswordSerializer(serializers.Serializer):

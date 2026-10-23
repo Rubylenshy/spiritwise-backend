@@ -149,7 +149,7 @@ class Badge(models.Model):
         ('sermons', 'Sermons completed'),
     ]
 
-    name = models.CharField(max_length=100, unique=True)
+    name = models.CharField(max_length=255, unique=True)
     description = models.CharField(max_length=200)
     icon = models.CharField(max_length=10, default='✦')  # emoji or symbol
     trigger = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default='xp')
