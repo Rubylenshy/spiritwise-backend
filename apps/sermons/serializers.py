@@ -1,3 +1,5 @@
+from django.db.models import Q
+from django.utils.text import slugify
 from rest_framework import serializers
 from .models import Sermon, Series, Tag, SermonQuestion, ListenHistory
 
@@ -151,4 +153,70 @@ class SermonDetailSerializer(FavoritedMixin, serializers.ModelSerializer):
 class ProgressUpdateSerializer(serializers.Serializer):
     progress_seconds = serializers.IntegerField(min_value=0)
     completed = serializers.BooleanField(default=False)
+
+
+# ── Admin dashboard (apps/sermons/manage_views.py) ───────────────────────────
+
+class TagManageSerializer(serializers.ModelSerializer):
+    sermon_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Tag
+        fields = ['id', 'name', 'slug', 'sermon_count']
+        read_only_fields = ['slug']
+
+    def validate_name(self, value):
+        value = ' '.join(value.split())
+        if not value:
+            raise serializers.ValidationError('Name is required.')
+        others = Tag.objects.exclude(pk=getattr(self.instance, 'pk', None))
+        if others.filter(Q(name__iexact=value) | Q(slug=slugify(value)[:255])).exists():
+            raise serializers.ValidationError('A tag with this name already exists.')
+        return value
+
+    def save(self, **kwargs):
+        # The slug follows the name, so a renamed tag's ?tag=<slug> filter still matches it
+        if 'name' in self.validated_data:
+            kwargs['slug'] = slugify(self.validated_data['name'])[:255]
+        return super().save(**kwargs)
+
+
+class SeriesManageSerializer(serializers.ModelSerializer):
+    sermon_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Series
+        fields = ['id', 'title', 'slug', 'description', 'cover_image', 'sermon_count', 'created_at']
+        read_only_fields = ['slug', 'cover_image', 'created_at']
+
+    def validate_title(self, value):
+        value = ' '.join(value.split())
+        if not value:
+            raise serializers.ValidationError('Title is required.')
+        # Series.resolve() matches imports by title case-insensitively, so keep titles unique
+        others = Series.objects.exclude(pk=getattr(self.instance, 'pk', None))
+        if others.filter(title__iexact=value).exists():
+            raise serializers.ValidationError('A series with this title already exists.')
+        return value
+
+
+class SermonManageSerializer(serializers.ModelSerializer):
+    """Every editable sermon field, published or not. Tags are written as tag_ids."""
+    tags = TagSerializer(many=True, read_only=True)
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        source='tags', queryset=Tag.objects.all(), many=True, write_only=True, required=False,
+    )
+    series = serializers.PrimaryKeyRelatedField(
+        queryset=Series.objects.all(), allow_null=True, required=False,
+    )
+    series_title = serializers.CharField(source='series.title', read_only=True, default=None)
+
+    class Meta:
+        model = Sermon
+        fields = [
+            'id', 'title', 'slug', 'speaker', 'series', 'series_title', 'tags', 'tag_ids',
+            'description', 'scripture_reference', 'sermon_date', 'is_published',
+            'duration_display', 'thumbnail', 'play_count', 'created_at',
+        ]
+        read_only_fields = ['slug', 'duration_display', 'thumbnail', 'play_count', 'created_at']
 

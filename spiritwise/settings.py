@@ -181,6 +181,12 @@ SIMPLE_JWT = {
     'USER_ID_CLAIM': 'user_id',
 }
 
+# ─── Google sign-in ───────────────────────────────────────────────────────────
+# OAuth 2.0 Web client ID from Google Cloud Console (APIs & Services → Credentials).
+# POST /api/auth/google/ only accepts ID tokens issued to this client; unset
+# disables Google sign-in. The frontend needs the same ID as VITE_GOOGLE_CLIENT_ID.
+GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
+
 # ─── Cache ────────────────────────────────────────────────────────────────────
 
 REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')

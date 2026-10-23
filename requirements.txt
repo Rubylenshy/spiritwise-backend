@@ -10,6 +10,7 @@ dj-database-url==2.2.0
 # Auth & Security
 django-cors-headers==4.4.0
 django-allauth==64.2.1
+google-auth==2.49.1
 python-decouple==3.8
 
 # Storage
